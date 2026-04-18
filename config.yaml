@@ -1,0 +1,12 @@
+llm:
+  base_url: "https://api.openai.com/v1"
+  api_key: "your-api-key"
+  model: "gpt-4o-mini"
+  timeout: 30
+
+server:
+  port: 8080
+
+simulation:
+  tick_interval: 5  # 秒
+  auto_run: false

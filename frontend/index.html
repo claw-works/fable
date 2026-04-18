@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>清水镇 - Fable 观察端</title>
+  <link rel="stylesheet" href="src/style.css">
+</head>
+<body>
+  <header>
+    <h1>🏘 清水镇</h1>
+    <div id="status">
+      <span id="game-time">Day1 08:00</span>
+      <span id="tick-count">Tick: 0</span>
+      <span id="ws-status" class="disconnected">● 未连接</span>
+    </div>
+  </header>
+
+  <main>
+    <section id="locations">
+      <h2>📍 各处动态</h2>
+      <div id="location-grid"></div>
+    </section>
+
+    <section id="timeline">
+      <h2>📜 事件流</h2>
+      <div id="event-list"></div>
+    </section>
+  </main>
+
+  <script src="src/main.js"></script>
+</body>
+</html>

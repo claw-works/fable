@@ -1,0 +1,95 @@
+/* 古朴中国风 */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  font-family: "Noto Serif SC", "SimSun", serif;
+  background: #f5f0e8;
+  color: #3a2e1f;
+  min-height: 100vh;
+}
+
+header {
+  background: #5c3d2e;
+  color: #f5f0e8;
+  padding: 1rem 2rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-bottom: 3px solid #8b6914;
+}
+
+header h1 { font-size: 1.5rem; font-weight: normal; letter-spacing: 0.3em; }
+
+#status { display: flex; gap: 1.5rem; font-size: 0.9rem; align-items: center; }
+#game-time { font-size: 1.1rem; font-weight: bold; color: #f0d68a; }
+
+.connected { color: #7ecf7e; }
+.disconnected { color: #e07070; }
+
+main { max-width: 1200px; margin: 0 auto; padding: 1.5rem; }
+
+h2 {
+  font-size: 1.1rem;
+  font-weight: normal;
+  letter-spacing: 0.2em;
+  border-bottom: 1px solid #c4a96a;
+  padding-bottom: 0.5rem;
+  margin-bottom: 1rem;
+  color: #5c3d2e;
+}
+
+/* 地点网格 */
+#location-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 1rem;
+  margin-bottom: 2rem;
+}
+
+.location-card {
+  background: #fffdf5;
+  border: 1px solid #d4c5a0;
+  border-radius: 4px;
+  padding: 1rem;
+  box-shadow: 1px 2px 4px rgba(0,0,0,0.08);
+}
+
+.location-card h3 {
+  font-size: 1rem;
+  color: #8b6914;
+  margin-bottom: 0.5rem;
+  font-weight: normal;
+}
+
+.location-card .agents { font-size: 0.85rem; line-height: 1.8; }
+
+.agent-tag {
+  display: inline-block;
+  background: #f0e6d0;
+  border: 1px solid #d4c5a0;
+  border-radius: 3px;
+  padding: 0.15rem 0.5rem;
+  margin: 0.15rem;
+  font-size: 0.8rem;
+}
+
+/* 事件流 */
+#event-list { max-height: 500px; overflow-y: auto; }
+
+.event-item {
+  padding: 0.6rem 0;
+  border-bottom: 1px dashed #d4c5a0;
+  font-size: 0.9rem;
+  line-height: 1.6;
+}
+
+.event-item .time { color: #8b6914; margin-right: 0.5rem; font-size: 0.8rem; }
+.event-item .emotion { font-size: 0.75rem; color: #888; margin-left: 0.3rem; }
+
+.dialogue { color: #6b3a2e; font-style: italic; }
+.thought { color: #888; font-size: 0.8rem; }
+
+/* 滚动条 */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: #f5f0e8; }
+::-webkit-scrollbar-thumb { background: #c4a96a; border-radius: 3px; }

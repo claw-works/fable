@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Fable 管理端</title>
+  <link rel="stylesheet" href="src/style.css">
+</head>
+<body>
+  <header>
+    <h1>⚙ Fable 管理端</h1>
+    <div id="status">
+      <span id="ws-status" class="disconnected">● 未连接</span>
+    </div>
+  </header>
+
+  <main>
+    <!-- 模拟控制 -->
+    <section class="panel">
+      <h2>🎮 模拟控制</h2>
+      <div class="controls">
+        <button id="btn-start" onclick="api('/api/start','POST')">▶ 开始</button>
+        <button id="btn-stop" onclick="api('/api/stop','POST')">⏸ 暂停</button>
+        <button id="btn-tick" onclick="api('/api/tick','POST')">⏭ 单步 Tick</button>
+      </div>
+      <div id="sim-info">Tick: 0 | 时间: —</div>
+    </section>
+
+    <!-- 世界配置 -->
+    <section class="panel">
+      <h2>🌍 世界配置</h2>
+      <pre id="world-config">加载中...</pre>
+    </section>
+
+    <!-- Agent 配置 -->
+    <section class="panel">
+      <h2>👥 角色列表</h2>
+      <div id="agent-list"></div>
+    </section>
+
+    <!-- 历史记录 -->
+    <section class="panel">
+      <h2>📜 历史记录</h2>
+      <button onclick="loadHistory()">刷新历史</button>
+      <div id="history-list"></div>
+    </section>
+  </main>
+
+  <script src="src/main.js"></script>
+</body>
+</html>
