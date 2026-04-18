@@ -22,7 +22,7 @@ type Server struct {
 	upgrader websocket.Upgrader
 	clients  map[*websocket.Conn]bool
 	mu       sync.Mutex
-	cancel   context.CancelFunc // 用于停止自动运行
+	cancel   context.CancelFunc
 	running  bool
 }
 
@@ -36,7 +36,6 @@ func New(w *world.World, cfg schema.Config) *Server {
 		},
 		clients: make(map[*websocket.Conn]bool),
 	}
-	// 注册 Tick 回调，推送给所有 WebSocket 客户端
 	w.OnTick = s.broadcast
 	return s
 }
@@ -58,6 +57,12 @@ func (s *Server) Run() error {
 	mux.HandleFunc("/api/config/agents", s.handleAgentsConfig)
 	mux.HandleFunc("/api/history", s.handleHistory)
 	mux.HandleFunc("/ws", s.handleWS)
+
+	// Player API
+	mux.HandleFunc("/api/player/join", s.handlePlayerJoin)
+	mux.HandleFunc("/api/player/leave", s.handlePlayerLeave)
+	mux.HandleFunc("/api/player/state", s.handlePlayerState)
+	mux.HandleFunc("/api/player/action", s.handlePlayerAction)
 
 	// 根路径重定向到观察端
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -100,12 +105,10 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	s.clients[conn] = true
 	s.mu.Unlock()
 
-	// 发送当前状态
 	state := s.world.GetState()
 	data, _ := json.Marshal(state)
 	conn.WriteMessage(websocket.TextMessage, data)
 
-	// 保持连接，读取客户端消息（忽略）
 	for {
 		if _, _, err := conn.ReadMessage(); err != nil {
 			s.mu.Lock()
@@ -126,8 +129,8 @@ func (s *Server) handleTick(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	state := s.world.Tick(r.Context())
-	writeJSON(w, state)
+	resp := s.world.Tick(r.Context())
+	writeJSON(w, resp)
 }
 
 func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
@@ -189,6 +192,62 @@ func (s *Server) handleAgentsConfig(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, s.world.History)
+}
+
+// handlePlayerJoin 创建玩家角色加入模拟。
+func (s *Server) handlePlayerJoin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var cfg schema.PlayerConfig
+	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+		http.Error(w, "invalid body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if cfg.ID == "" {
+		cfg.ID = "player"
+	}
+	if cfg.InitLocation == "" {
+		cfg.InitLocation = "茶馆"
+	}
+	s.world.JoinPlayer(cfg)
+	writeJSON(w, map[string]string{"status": "joined", "player_id": cfg.ID})
+}
+
+// handlePlayerLeave 玩家离开模拟。
+func (s *Server) handlePlayerLeave(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	s.world.LeavePlayer()
+	writeJSON(w, map[string]string{"status": "left"})
+}
+
+// handlePlayerState 获取玩家当前状态。
+func (s *Server) handlePlayerState(w http.ResponseWriter, r *http.Request) {
+	ps := s.world.PlayerState
+	if ps == nil {
+		writeJSON(w, map[string]string{"status": "not_joined"})
+		return
+	}
+	writeJSON(w, ps)
+}
+
+// handlePlayerAction 提交玩家行动。
+func (s *Server) handlePlayerAction(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var action schema.PlayerAction
+	if err := json.NewDecoder(r.Body).Decode(&action); err != nil {
+		http.Error(w, "invalid body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	s.world.SubmitAction(action)
+	writeJSON(w, map[string]string{"status": "submitted"})
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

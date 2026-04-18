@@ -1,0 +1,7 @@
+id: "qingshui-town"
+name: "清水镇"
+version: "1.0.0"
+author: "cloudbeer"
+description: "古代中国江南小镇，因镇旁清水河得名"
+tags: ["古代", "中国", "社交", "江湖"]
+repo: "https://github.com/claw-works/fable-worlds"

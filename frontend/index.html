@@ -17,6 +17,62 @@
   </header>
 
   <main>
+    <!-- 玩家交互区 -->
+    <section id="player-section">
+      <h2>🎭 玩家模式</h2>
+      <div id="player-not-joined">
+        <button id="btn-join" onclick="showJoinForm()">加入小镇</button>
+      </div>
+      <div id="join-form" style="display:none">
+        <div class="form-row"><label>姓名</label><input id="p-name" value="李逍遥" /></div>
+        <div class="form-row"><label>年龄</label><input id="p-age" type="number" value="22" /></div>
+        <div class="form-row"><label>职业</label><input id="p-occupation" value="游侠" /></div>
+        <div class="form-row"><label>性格</label><input id="p-personality" value="豪爽仗义" /></div>
+        <div class="form-row"><label>背景</label><textarea id="p-backstory" rows="2">江湖漂泊的年轻侠客</textarea></div>
+        <div class="form-row"><label>起始地点</label>
+          <select id="p-location"></select>
+        </div>
+        <div class="form-actions">
+          <button onclick="doJoin()">确认加入</button>
+          <button onclick="hideJoinForm()">取消</button>
+        </div>
+      </div>
+      <div id="player-joined" style="display:none">
+        <div id="player-info"></div>
+        <div id="waiting-banner" class="waiting-banner" style="display:none">⏳ 等待你的行动…</div>
+        <div id="action-panel" style="display:none">
+          <div class="action-tabs">
+            <button class="tab active" data-tab="move" onclick="switchTab('move')">🚶 移动</button>
+            <button class="tab" data-tab="talk" onclick="switchTab('talk')">💬 对话</button>
+            <button class="tab" data-tab="act" onclick="switchTab('act')">⚡ 行动</button>
+            <button class="tab" data-tab="skip" onclick="switchTab('skip')">⏭ 跳过</button>
+          </div>
+          <div id="tab-move" class="tab-content">
+            <label>目的地</label>
+            <select id="move-target"></select>
+            <button onclick="submitAction('move')">前往</button>
+          </div>
+          <div id="tab-talk" class="tab-content" style="display:none">
+            <label>对谁说</label>
+            <select id="talk-target"></select>
+            <label>说什么</label>
+            <input id="talk-content" placeholder="输入对话内容…" />
+            <button onclick="submitAction('talk')">说话</button>
+          </div>
+          <div id="tab-act" class="tab-content" style="display:none">
+            <label>做什么</label>
+            <input id="act-content" placeholder="描述你的行动…" />
+            <button onclick="submitAction('act')">执行</button>
+          </div>
+          <div id="tab-skip" class="tab-content" style="display:none">
+            <p>静静观察周围的一切。</p>
+            <button onclick="submitAction('skip')">跳过此回合</button>
+          </div>
+        </div>
+        <button id="btn-leave" onclick="doLeave()">离开小镇</button>
+      </div>
+    </section>
+
     <section id="locations">
       <h2>📍 各处动态</h2>
       <div id="location-grid"></div>

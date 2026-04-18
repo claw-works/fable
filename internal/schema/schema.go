@@ -83,8 +83,49 @@ type SimulationConfig struct {
 	AutoRun      bool `yaml:"auto_run"`
 }
 
+// WorldManifest 表示世界包的元信息（manifest.yaml）。
+type WorldManifest struct {
+	ID          string   `yaml:"id"`
+	Name        string   `yaml:"name"`
+	Version     string   `yaml:"version"`
+	Author      string   `yaml:"author"`
+	Description string   `yaml:"description"`
+	Tags        []string `yaml:"tags"`
+	Repo        string   `yaml:"repo"`
+}
+
 // TickResult 表示一次 Tick 的完整结果。
 type TickResult struct {
 	WorldState WorldState `json:"world_state"`
 	Error      error      `json:"-"`
+}
+
+// PlayerConfig 玩家角色配置。
+type PlayerConfig struct {
+	ID           string `json:"id" yaml:"id"`
+	Name         string `json:"name" yaml:"name"`
+	Age          int    `json:"age" yaml:"age"`
+	Occupation   string `json:"occupation" yaml:"occupation"`
+	Personality  string `json:"personality" yaml:"personality"`
+	Backstory    string `json:"backstory" yaml:"backstory"`
+	InitLocation string `json:"init_location" yaml:"init_location"`
+}
+
+// PlayerAction 玩家在某个 Tick 的输入。
+type PlayerAction struct {
+	Type     string  `json:"type"`               // "move" | "talk" | "act" | "skip"
+	Location *string `json:"location,omitempty"`  // move 时目标地点
+	Target   *string `json:"target,omitempty"`    // talk 时目标 agent_id
+	Content  string  `json:"content,omitempty"`   // talk/act 的内容
+}
+
+// PlayerState 玩家当前状态（和 AgentState 对齐）。
+type PlayerState struct {
+	PlayerID string  `json:"player_id"`
+	Tick     int     `json:"tick"`
+	GameTime string  `json:"game_time"`
+	Location string  `json:"location"`
+	Action   string  `json:"action"`
+	Target   *string `json:"target,omitempty"`
+	Dialogue *string `json:"dialogue,omitempty"`
 }
