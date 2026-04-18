@@ -3,27 +3,42 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 
 	"github.com/claw-works/fable/internal/llm"
 	"github.com/claw-works/fable/internal/schema"
+	"github.com/claw-works/fable/internal/storage"
 	"github.com/claw-works/fable/internal/world"
 	"github.com/claw-works/fable/server"
 	"gopkg.in/yaml.v3"
 )
 
 func main() {
-	cfg, err := loadConfig("config.yaml")
+	configFlag := flag.String("config", "", "配置文件路径")
+	worldFlag := flag.String("world", "", "世界目录路径")
+	flag.Parse()
+
+	// 首次启动初始化 ~/.fable
+	if _, err := os.Stat(storage.FableDir()); os.IsNotExist(err) {
+		if err := storage.Init("worlds"); err != nil {
+			log.Printf("warn: init ~/.fable: %v", err)
+		} else {
+			fmt.Println("🏘️  首次启动！已初始化 ~/.fable/")
+			fmt.Println("📝  请编辑 ~/.fable/config.yaml 填入您的 LLM API Key")
+			fmt.Println("🌏  已安装示例世界：清水镇（qingshui-town）")
+		}
+	}
+
+	cfg, err := resolveConfig(*configFlag)
 	if err != nil {
 		log.Fatalf("load config: %v", err)
 	}
 
-	worldDir := "worlds/example"
-	if len(os.Args) > 1 {
-		worldDir = os.Args[1]
-	}
+	worldDir := resolveWorldDir(*worldFlag)
 
 	llmClient := llm.New(cfg.LLM)
 
@@ -40,6 +55,37 @@ func main() {
 	if err := srv.Run(); err != nil {
 		log.Fatalf("server error: %v", err)
 	}
+}
+
+// resolveConfig 按优先级加载配置：--config > ~/.fable/config.yaml > ./config.yaml
+func resolveConfig(flagPath string) (*schema.Config, error) {
+	paths := []string{flagPath, storage.ConfigPath(), "config.yaml"}
+	for _, p := range paths {
+		if p == "" {
+			continue
+		}
+		if _, err := os.Stat(p); err == nil {
+			return loadConfig(p)
+		}
+	}
+	return nil, fmt.Errorf("no config file found")
+}
+
+// resolveWorldDir 按优先级确定世界目录：--world > ~/.fable/worlds/第一个 > ./worlds/example
+func resolveWorldDir(flagPath string) string {
+	if flagPath != "" {
+		return flagPath
+	}
+	// 尝试 ~/.fable/worlds/ 第一个世界
+	entries, err := os.ReadDir(storage.WorldsDir())
+	if err == nil {
+		for _, e := range entries {
+			if e.IsDir() {
+				return filepath.Join(storage.WorldsDir(), e.Name())
+			}
+		}
+	}
+	return "worlds/example"
 }
 
 func loadConfig(path string) (*schema.Config, error) {

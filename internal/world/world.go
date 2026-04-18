@@ -17,15 +17,17 @@ import (
 // World 表示整个模拟世界。
 type World struct {
 	mu            sync.RWMutex
-	Manifest      *schema.WorldManifest  // 可选，来自 manifest.yaml
+	Manifest      *schema.WorldManifest
 	Config        schema.WorldConfig
 	Agents        map[string]*agent.Agent
 	State         schema.WorldState
 	History       []schema.WorldState
-	OnTick        func(schema.WorldState) // Tick 完成后的回调（用于推送 WebSocket）
-	Player        *schema.PlayerConfig    // nil 表示旁观模式
+	OnTick        func(schema.WorldState)
+	Player        *schema.PlayerConfig
 	PlayerState   *schema.PlayerState
-	PendingAction *schema.PlayerAction    // 等待玩家输入的 Tick
+	PendingAction *schema.PlayerAction
+	Mode          schema.SimulationMode
+	Conversation  *schema.ConversationSession
 }
 
 // Load 从指定目录加载世界配置和角色配置。
@@ -69,7 +71,8 @@ func Load(dir string, llmClient *llm.Client) (*World, error) {
 	return &World{
 		Manifest: manifest,
 		Config:   wCfg,
-		Agents: agents,
+		Agents:   agents,
+		Mode:     schema.ModeAuto,
 		State: schema.WorldState{
 			Tick:      0,
 			GameTime:  "Day1 08:00",
@@ -235,4 +238,104 @@ func (w *World) advanceTime(current string) string {
 		day++
 	}
 	return fmt.Sprintf("Day%d %02d:%02d", day, hour, min)
+}
+
+// FindPath 用 BFS 找两点间最短路径，返回路径和总 Tick 消耗。
+func (w *World) FindPath(from, to string) ([]string, int) {
+	if from == to {
+		return []string{from}, 0
+	}
+	// 构建邻接表
+	adj := make(map[string][]schema.Connection)
+	for _, loc := range w.Config.Locations {
+		adj[loc.Name] = loc.Connected
+	}
+
+	type node struct {
+		name string
+		path []string
+		cost int
+	}
+	visited := map[string]bool{from: true}
+	queue := []node{{name: from, path: []string{from}, cost: 0}}
+
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		for _, conn := range adj[cur.name] {
+			if conn.Target == to {
+				return append(cur.path, to), cur.cost + conn.Distance
+			}
+			if !visited[conn.Target] {
+				visited[conn.Target] = true
+				queue = append(queue, node{
+					name: conn.Target,
+					path: append(append([]string{}, cur.path...), conn.Target),
+					cost: cur.cost + conn.Distance,
+				})
+			}
+		}
+	}
+	return nil, 0
+}
+
+// StartConversation 开始玩家和 NPC 的对话，切换到 slow 模式。
+func (w *World) StartConversation(playerID, npcID string) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.Conversation != nil && w.Conversation.Active {
+		return fmt.Errorf("已有进行中的对话")
+	}
+	// 检查 NPC 是否存在
+	if _, ok := w.Agents[npcID]; !ok {
+		return fmt.Errorf("NPC %s 不存在", npcID)
+	}
+	// 检查玩家和 NPC 是否在同一地点
+	if w.PlayerState != nil {
+		npcLoc := w.Agents[npcID].State.Location
+		if w.PlayerState.Location != npcLoc {
+			return fmt.Errorf("你不在 %s 所在的地点", npcID)
+		}
+	}
+	w.Conversation = &schema.ConversationSession{
+		PlayerID:  playerID,
+		NPCid:     npcID,
+		StartTick: w.State.Tick,
+		Active:    true,
+	}
+	w.Mode = schema.ModeSlow
+	return nil
+}
+
+// AddConversationTurn 添加一轮对话。
+func (w *World) AddConversationTurn(speaker, content string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.Conversation == nil || !w.Conversation.Active {
+		return
+	}
+	w.Conversation.History = append(w.Conversation.History, schema.ConversationTurn{
+		Speaker: speaker,
+		Content: content,
+		Tick:    w.State.Tick,
+	})
+}
+
+// EndConversation 结束对话，摘要注入当前 Tick 事件，恢复正常模式。
+func (w *World) EndConversation() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.Conversation == nil || !w.Conversation.Active {
+		return ""
+	}
+	// 生成摘要
+	npcName := w.Conversation.NPCid
+	if a, ok := w.Agents[w.Conversation.NPCid]; ok {
+		npcName = a.Config.Name
+	}
+	summary := fmt.Sprintf("玩家与%s进行了一段对话（共%d轮）", npcName, len(w.Conversation.History))
+	w.State.Events = append(w.State.Events, summary)
+	w.Conversation.Active = false
+	w.Mode = schema.ModeAuto
+	return summary
 }

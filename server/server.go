@@ -64,6 +64,13 @@ func (s *Server) Run() error {
 	mux.HandleFunc("/api/player/state", s.handlePlayerState)
 	mux.HandleFunc("/api/player/action", s.handlePlayerAction)
 
+	// Conversation API
+	mux.HandleFunc("/api/conversation/start", s.handleConvStart)
+	mux.HandleFunc("/api/conversation/say", s.handleConvSay)
+	mux.HandleFunc("/api/conversation/action", s.handleConvAction)
+	mux.HandleFunc("/api/conversation/end", s.handleConvEnd)
+	mux.HandleFunc("/api/conversation/history", s.handleConvHistory)
+
 	// 根路径重定向到观察端
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/" {
@@ -253,4 +260,79 @@ func (s *Server) handlePlayerAction(w http.ResponseWriter, r *http.Request) {
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(v)
+}
+
+func (s *Server) handleConvStart(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		NPCID string `json:"npc_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+	playerID := ""
+	if s.world.Player != nil {
+		playerID = s.world.Player.ID
+	}
+	if err := s.world.StartConversation(playerID, body.NPCID); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, map[string]string{"status": "started", "npc_id": body.NPCID})
+}
+
+func (s *Server) handleConvSay(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		Content string `json:"content"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+	s.world.AddConversationTurn("player", body.Content)
+	writeJSON(w, map[string]string{"status": "ok"})
+}
+
+func (s *Server) handleConvAction(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		Content string `json:"content"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+	// 对话中行动消耗 Tick
+	s.world.AddConversationTurn("player", "[行动] "+body.Content)
+	resp := s.world.Tick(r.Context())
+	writeJSON(w, resp)
+}
+
+func (s *Server) handleConvEnd(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	summary := s.world.EndConversation()
+	writeJSON(w, map[string]string{"status": "ended", "summary": summary})
+}
+
+func (s *Server) handleConvHistory(w http.ResponseWriter, r *http.Request) {
+	conv := s.world.Conversation
+	if conv == nil {
+		writeJSON(w, map[string]any{"active": false, "history": []any{}})
+		return
+	}
+	writeJSON(w, conv)
 }

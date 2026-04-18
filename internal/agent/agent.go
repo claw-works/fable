@@ -35,7 +35,8 @@ func New(cfg schema.AgentConfig, llmClient *llm.Client) *Agent {
 
 // Think 让 Agent 根据当前世界状态进行思考并产生行动。
 func (a *Agent) Think(ctx context.Context, world schema.WorldState) (schema.AgentState, error) {
-	prompt := a.buildPrompt(world)
+	filtered := FilterWorldStateForAgent(world, a.Config.ID)
+	prompt := a.buildPrompt(filtered)
 
 	messages := []llm.Message{
 		{Role: "system", Content: fmt.Sprintf(
@@ -88,4 +89,51 @@ func (a *Agent) buildPrompt(world schema.WorldState) string {
 		fmt.Fprintf(&b, "- %s\n", e)
 	}
 	return b.String()
+}
+
+// FilterWorldStateForAgent 过滤世界状态，NPC 只能看到：
+// - 当前地点有哪些人（同地点可见）
+// - 自己亲历的事件（包含自己名字或 agent_id 的事件）
+// - 全局事件（以"【"开头的广播事件）
+func FilterWorldStateForAgent(state schema.WorldState, agentID string) schema.WorldState {
+	filtered := schema.WorldState{
+		Tick:     state.Tick,
+		GameTime: state.GameTime,
+	}
+
+	// 找到 agent 当前所在地点
+	agentLoc := ""
+	for _, a := range state.Agents {
+		if a.AgentID == agentID {
+			agentLoc = a.Location
+			break
+		}
+	}
+
+	// 只保留同地点的人
+	filtered.Locations = map[string][]string{}
+	if agents, ok := state.Locations[agentLoc]; ok {
+		filtered.Locations[agentLoc] = agents
+	}
+
+	// 只保留同地点的 agent 状态（隐藏 InnerThought）
+	for _, a := range state.Agents {
+		if a.Location == agentLoc {
+			visible := a
+			if visible.AgentID != agentID {
+				visible.InnerThought = ""
+				visible.MemoryUpdate = nil
+			}
+			filtered.Agents = append(filtered.Agents, visible)
+		}
+	}
+
+	// 过滤事件：只保留全局广播和与自己相关的
+	for _, e := range state.Events {
+		if strings.HasPrefix(e, "【") || strings.Contains(e, agentID) {
+			filtered.Events = append(filtered.Events, e)
+		}
+	}
+
+	return filtered
 }

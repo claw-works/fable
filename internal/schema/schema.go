@@ -24,11 +24,18 @@ type WorldState struct {
 	Agents    []AgentState        `json:"agents"     yaml:"agents"`
 }
 
+// Connection 表示地点之间的连接，带距离权重。
+type Connection struct {
+	Target   string `yaml:"name"`
+	Distance int    `yaml:"distance"` // 移动消耗的 Tick 数
+}
+
 // Location 表示世界中的一个地点。
 type Location struct {
-	Name        string   `yaml:"name"`
-	Description string   `yaml:"description"`
-	Connected   []string `yaml:"connected"` // 相邻地点
+	Name        string       `yaml:"name"`
+	Description string       `yaml:"description"`
+	Connected   []Connection `yaml:"connected"`
+	Capacity    int          `yaml:"capacity,omitempty"`
 }
 
 // AgentConfig 表示角色配置，从 YAML 读取。
@@ -129,3 +136,28 @@ type PlayerState struct {
 	Target   *string `json:"target,omitempty"`
 	Dialogue *string `json:"dialogue,omitempty"`
 }
+
+// ConversationTurn 表示对话中的一轮发言。
+type ConversationTurn struct {
+	Speaker string `json:"speaker"` // "player" 或 agent_id
+	Content string `json:"content"`
+	Tick    int    `json:"tick"`
+}
+
+// ConversationSession 表示一次玩家与 NPC 的对话会话。
+type ConversationSession struct {
+	PlayerID  string             `json:"player_id"`
+	NPCid     string             `json:"npc_id"`
+	History   []ConversationTurn `json:"history"`
+	StartTick int                `json:"start_tick"`
+	Active    bool               `json:"active"`
+}
+
+// SimulationMode 表示模拟运行模式。
+type SimulationMode string
+
+const (
+	ModeAuto         SimulationMode = "auto"
+	ModeSlow         SimulationMode = "slow"
+	ModePlayerDriven SimulationMode = "player_driven"
+)

@@ -8,22 +8,50 @@ description: |
 locations:
   - name: "茶馆"
     description: "镇上最热闹的地方，掌柜泡得一手好茶，说书人每日午后开讲。"
-    connected: ["集市", "私塾", "城隍庙"]
+    connected:
+      - name: "集市"
+        distance: 1
+      - name: "私塾"
+        distance: 1
+      - name: "城隍庙"
+        distance: 2
   - name: "集市"
     description: "沿街两排摊位，卖的是柴米油盐、针头线脑，偶有外地珍奇货物。"
-    connected: ["茶馆", "铁匠铺", "渡口"]
+    connected:
+      - name: "茶馆"
+        distance: 1
+      - name: "铁匠铺"
+        distance: 1
+      - name: "渡口"
+        distance: 2
   - name: "铁匠铺"
     description: "炉火日夜不熄，叮叮当当的打铁声是小镇的心跳。"
-    connected: ["集市", "城隍庙"]
+    connected:
+      - name: "集市"
+        distance: 1
+      - name: "城隍庙"
+        distance: 1
   - name: "私塾"
     description: "青瓦白墙的小院，朗朗读书声从窗户飘出。"
-    connected: ["茶馆", "城隍庙"]
+    connected:
+      - name: "茶馆"
+        distance: 1
+      - name: "城隍庙"
+        distance: 1
   - name: "城隍庙"
     description: "镇上最古老的建筑，香火旺盛，逢年过节必有庙会。"
-    connected: ["茶馆", "铁匠铺", "私塾"]
+    connected:
+      - name: "茶馆"
+        distance: 2
+      - name: "铁匠铺"
+        distance: 1
+      - name: "私塾"
+        distance: 1
   - name: "渡口"
     description: "清水河上唯一的渡口，连接着外面的世界。"
-    connected: ["集市"]
+    connected:
+      - name: "集市"
+        distance: 2
 
 rules:
   - "角色只能移动到相邻地点"
