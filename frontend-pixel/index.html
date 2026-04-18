@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>清水镇 - 像素风格</title>
+  <link rel="stylesheet" href="src/style.css">
+</head>
+<body>
+
+<canvas id="game-canvas" tabindex="0"></canvas>
+
+<!-- HUD 左上 -->
+<div id="hud">
+  <span id="hud-time">Day1 08:00</span>
+  <span id="hud-tick">Tick 0</span>
+  <span class="dot" id="ws-dot"></span>
+  <button onclick="doTick()">⏭</button>
+  <button onclick="doStart()">▶</button>
+  <button onclick="doStop()">⏸</button>
+</div>
+
+<div id="controls-hint">WASD 移动 · 点击地图获取焦点</div>
+
+<!-- 右侧浮动面板 -->
+<div id="side-panel">
+  <div class="panel-header">🏘 清水镇</div>
+  <div id="player-area">
+    <button id="join-btn" onclick="showJoinForm()">🎮 加入小镇</button>
+    <div id="join-panel">
+      <label>姓名</label><input id="p-name" value="李逍遥">
+      <label>职业</label><input id="p-occupation" value="游侠">
+      <label>性格</label><input id="p-personality" value="豪爽仗义">
+      <label>年龄</label><input id="p-age" type="number" value="22">
+      <label>背景</label><textarea id="p-backstory">江湖漂泊的年轻侠客</textarea>
+      <label>起始地点</label><select id="p-location"></select>
+      <div class="btns">
+        <button onclick="doJoin()">确认加入</button>
+        <button onclick="document.querySelector('#join-panel').style.display='none';document.querySelector('#join-btn').style.display='block'">取消</button>
+      </div>
+    </div>
+    <div id="player-controls">
+      <div class="info">🎮 <span id="player-name-display"></span> · WASD 移动</div>
+      <div class="row"><input id="talk-input" placeholder="说点什么…"><button onclick="doTalk()">💬</button></div>
+      <div class="row"><input id="act-input" placeholder="做点什么…"><button onclick="doAct()">⚡</button></div>
+      <button class="leave" onclick="doLeave()">离开小镇</button>
+    </div>
+  </div>
+  <div class="panel-header">📜 事件流</div>
+  <div id="event-area"><div id="event-list"></div></div>
+</div>
+
+<script src="src/map.js"></script>
+<script src="src/game.js"></script>
+</body>
+</html>

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"time"
 
@@ -75,7 +76,10 @@ func (c *Client) chat(ctx context.Context, messages []Message, rf *responseForma
 		return "", fmt.Errorf("marshal request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.cfg.BaseURL+"/chat/completions", bytes.NewReader(body))
+	url := c.cfg.BaseURL + "/chat/completions"
+	log.Printf("[llm] → POST %s model=%s msgs=%d", url, c.cfg.Model, len(messages))
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("create request: %w", err)
 	}
@@ -84,6 +88,7 @@ func (c *Client) chat(ctx context.Context, messages []Message, rf *responseForma
 
 	resp, err := c.http.Do(req)
 	if err != nil {
+		log.Printf("[llm] ✗ 请求失败: %v", err)
 		return "", fmt.Errorf("do request: %w", err)
 	}
 	defer resp.Body.Close()
@@ -93,6 +98,7 @@ func (c *Client) chat(ctx context.Context, messages []Message, rf *responseForma
 		return "", fmt.Errorf("read response: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
+		log.Printf("[llm] ✗ HTTP %d: %s", resp.StatusCode, string(respBody)[:min(200, len(respBody))])
 		return "", fmt.Errorf("api error %d: %s", resp.StatusCode, string(respBody))
 	}
 
@@ -103,5 +109,13 @@ func (c *Client) chat(ctx context.Context, messages []Message, rf *responseForma
 	if len(cr.Choices) == 0 {
 		return "", fmt.Errorf("empty choices in response")
 	}
+	log.Printf("[llm] ✓ 响应 %d chars", len(cr.Choices[0].Message.Content))
 	return cr.Choices[0].Message.Content, nil
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

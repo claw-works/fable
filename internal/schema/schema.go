@@ -4,6 +4,7 @@ package schema
 // AgentState 表示每个 Tick 中 Agent 的输出状态，结构化便于前端渲染。
 type AgentState struct {
 	AgentID      string   `json:"agent_id"      yaml:"agent_id"`
+	Name         string   `json:"name"          yaml:"name"`
 	Tick         int      `json:"tick"           yaml:"tick"`
 	GameTime     string   `json:"game_time"      yaml:"game_time"`      // "Day1 08:30"
 	Location     string   `json:"location"       yaml:"location"`
@@ -26,16 +27,16 @@ type WorldState struct {
 
 // Connection 表示地点之间的连接，带距离权重。
 type Connection struct {
-	Target   string `yaml:"name"`
-	Distance int    `yaml:"distance"` // 移动消耗的 Tick 数
+	Target   string `json:"name" yaml:"name"`
+	Distance int    `json:"distance" yaml:"distance"`
 }
 
 // Location 表示世界中的一个地点。
 type Location struct {
-	Name        string       `yaml:"name"`
-	Description string       `yaml:"description"`
-	Connected   []Connection `yaml:"connected"`
-	Capacity    int          `yaml:"capacity,omitempty"`
+	Name        string       `json:"name" yaml:"name"`
+	Description string       `json:"description" yaml:"description"`
+	Connected   []Connection `json:"connected" yaml:"connected"`
+	Capacity    int          `json:"capacity,omitempty" yaml:"capacity,omitempty"`
 }
 
 // AgentConfig 表示角色配置，从 YAML 读取。
@@ -52,11 +53,11 @@ type AgentConfig struct {
 
 // WorldConfig 表示世界配置，从 YAML 读取。
 type WorldConfig struct {
-	Name        string     `yaml:"name"`
-	Description string     `yaml:"description"`
-	Locations   []Location `yaml:"locations"`
-	Rules       []string   `yaml:"rules"`
-	TimeStep    int        `yaml:"time_step"` // 每 Tick 多少分钟
+	Name        string     `json:"name" yaml:"name"`
+	Description string     `json:"description" yaml:"description"`
+	Locations   []Location `json:"locations" yaml:"locations"`
+	Rules       []string   `json:"rules" yaml:"rules"`
+	TimeStep    int        `json:"time_step" yaml:"time_step"`
 }
 
 // AgentsFile 表示 agents.yaml 的顶层结构。
@@ -69,6 +70,7 @@ type Config struct {
 	LLM        LLMConfig        `yaml:"llm"`
 	Server     ServerConfig     `yaml:"server"`
 	Simulation SimulationConfig `yaml:"simulation"`
+	DevMode    bool             `yaml:"dev_mode"`
 }
 
 // LLMConfig 表示 LLM 调用配置。
@@ -153,11 +155,24 @@ type ConversationSession struct {
 	Active    bool               `json:"active"`
 }
 
-// SimulationMode 表示模拟运行模式。
+// SimulationMode 表示模拟运行模式（状态机）。
 type SimulationMode string
 
 const (
-	ModeAuto         SimulationMode = "auto"
-	ModeSlow         SimulationMode = "slow"
-	ModePlayerDriven SimulationMode = "player_driven"
+	ModeIdle    SimulationMode = "idle"    // 未运行
+	ModeRunning SimulationMode = "running" // 自动运行中
+	ModePaused  SimulationMode = "paused"  // 暂停等待玩家响应
 )
+
+// SaveData 存档数据，包含世界状态和玩家数据。
+type SaveData struct {
+	State       WorldState   `json:"state"`
+	Player      *PlayerConfig `json:"player,omitempty"`
+	PlayerState *PlayerState  `json:"player_state,omitempty"`
+}
+
+// LastSession 记录上次使用的世界和存档名。
+type LastSession struct {
+	WorldID  string `yaml:"world_id"`
+	SaveName string `yaml:"save_name"`
+}

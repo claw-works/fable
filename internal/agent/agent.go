@@ -26,6 +26,7 @@ func New(cfg schema.AgentConfig, llmClient *llm.Client) *Agent {
 		Memory: []string{cfg.Backstory},
 		State: schema.AgentState{
 			AgentID:  cfg.ID,
+			Name:     cfg.Name,
 			Location: cfg.InitLocation,
 			Emotion:  "平静",
 		},
@@ -58,6 +59,7 @@ func (a *Agent) Think(ctx context.Context, world schema.WorldState) (schema.Agen
 	}
 
 	result.AgentID = a.Config.ID
+	result.Name = a.Config.Name
 	result.Tick = world.Tick + 1
 	result.GameTime = world.GameTime
 

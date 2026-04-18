@@ -6,23 +6,37 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"sync"
 
 	"github.com/claw-works/fable/internal/agent"
 	"github.com/claw-works/fable/internal/llm"
 	"github.com/claw-works/fable/internal/schema"
+	"github.com/claw-works/fable/internal/storage"
 	"gopkg.in/yaml.v3"
 )
+
+// StreamEvent 是流式推送的增量事件。
+type StreamEvent struct {
+	Type       string              `json:"type"`                  // "agent_update" | "event"
+	AgentState *schema.AgentState  `json:"agent_state,omitempty"`
+	Text       string              `json:"text,omitempty"`
+	GameTime   string              `json:"game_time"`
+	Tick       int                 `json:"tick"`
+}
 
 // World 表示整个模拟世界。
 type World struct {
 	mu            sync.RWMutex
+	WorldID       string
+	SaveName      string
 	Manifest      *schema.WorldManifest
 	Config        schema.WorldConfig
 	Agents        map[string]*agent.Agent
 	State         schema.WorldState
 	History       []schema.WorldState
-	OnTick        func(schema.WorldState)
+	OnTick        func(schema.WorldState)       // tick 完成后推送完整状态
+	OnEvent       func(StreamEvent)             // 增量事件实时推送
 	Player        *schema.PlayerConfig
 	PlayerState   *schema.PlayerState
 	PendingAction *schema.PlayerAction
@@ -31,7 +45,7 @@ type World struct {
 }
 
 // Load 从指定目录加载世界配置和角色配置。
-func Load(dir string, llmClient *llm.Client) (*World, error) {
+func Load(dir string, saveName string, llmClient *llm.Client) (*World, error) {
 	wData, err := os.ReadFile(dir + "/world.yaml")
 	if err != nil {
 		return nil, fmt.Errorf("read world.yaml: %w", err)
@@ -68,17 +82,43 @@ func Load(dir string, llmClient *llm.Client) (*World, error) {
 		}
 	}
 
-	return &World{
+	worldID := filepath.Base(dir)
+
+	// 构建初始 Agent 状态列表
+	initAgents := make([]schema.AgentState, 0, len(agents))
+	for _, ag := range agents {
+		initAgents = append(initAgents, ag.State)
+	}
+
+	w := &World{
+		WorldID:  worldID,
+		SaveName: saveName,
 		Manifest: manifest,
 		Config:   wCfg,
 		Agents:   agents,
-		Mode:     schema.ModeAuto,
+		Mode:     schema.ModeIdle,
 		State: schema.WorldState{
 			Tick:      0,
 			GameTime:  "Day1 08:00",
 			Locations: locations,
+			Agents:    initAgents,
 		},
-	}, nil
+	}
+
+	// 尝试恢复存档
+	if saved, err := storage.LoadLatestSave(); err == nil {
+		w.State = saved.State
+		w.Player = saved.Player
+		w.PlayerState = saved.PlayerState
+		for _, a := range saved.State.Agents {
+			if ag, ok := w.Agents[a.AgentID]; ok {
+				ag.State = a
+			}
+		}
+		log.Printf("[world] 已恢复存档: tick=%d, time=%s", saved.State.Tick, saved.State.GameTime)
+	}
+
+	return w, nil
 }
 
 // TickResponse 是 Tick 返回给调用方的结构。
@@ -88,70 +128,143 @@ type TickResponse struct {
 	PlayerState      *schema.PlayerState `json:"player_state,omitempty"`
 }
 
-// Tick 执行一次世界更新。
+// Tick 执行一次世界更新。NPC 并行推理，每个完成后立即推送。
 func (w *World) Tick(ctx context.Context) TickResponse {
+	log.Println("[tick] 尝试获取锁...")
 	w.mu.Lock()
-	defer w.mu.Unlock()
-
-	// 玩家模式：若无待处理行动则暂停等待
-	if w.Player != nil && w.PendingAction == nil {
-		return TickResponse{State: w.State, WaitingForPlayer: true, PlayerState: w.PlayerState}
-	}
+	log.Println("[tick] 已获取锁")
 
 	w.State.Tick++
 	w.State.GameTime = w.advanceTime(w.State.GameTime)
+	log.Printf("[tick %d] 时间推进到 %s", w.State.Tick, w.State.GameTime)
 
-	// 处理玩家行动
+	// 处理玩家行动（有就处理，没有就跳过）
 	var playerEvent string
 	if w.Player != nil && w.PendingAction != nil {
 		playerEvent = w.applyPlayerAction()
 		w.PendingAction = nil
+		log.Printf("[tick %d] 玩家行动: %s", w.State.Tick, playerEvent)
+	} else if w.Player != nil {
+		log.Printf("[tick %d] 玩家在场但无行动，继续推理", w.State.Tick)
 	}
 
+	// 快照当前状态供 NPC 推理用
+	snapshot := w.State
+	if playerEvent != "" {
+		snapshot.Events = append(append([]string{}, snapshot.Events...), playerEvent)
+	}
+	agentList := make([]*agent.Agent, 0, len(w.Agents))
+	agentIDs := make([]string, 0, len(w.Agents))
+	for id, a := range w.Agents {
+		agentList = append(agentList, a)
+		agentIDs = append(agentIDs, id)
+	}
+	onEvent := w.OnEvent
+	playerState := w.PlayerState
+	var playerID string
+	if w.Player != nil {
+		playerID = w.Player.ID
+	}
+
+	// 释放锁，开始并行推理（不持锁）
+	w.mu.Unlock()
+	log.Printf("[tick %d] 开始并行推理，共 %d 个 NPC", snapshot.Tick, len(agentList))
+
+	// 立即推送玩家事件
+	if playerEvent != "" && onEvent != nil {
+		onEvent(StreamEvent{Type: "event", Text: playerEvent, GameTime: snapshot.GameTime, Tick: snapshot.Tick})
+	}
+
+	// 并行推理
+	type agentResult struct {
+		id    string
+		state schema.AgentState
+	}
+	results := make(chan agentResult, len(agentList))
+	for i, a := range agentList {
+		go func(id string, ag *agent.Agent) {
+			log.Printf("[tick %d] NPC %s 开始推理...", snapshot.Tick, id)
+			state, err := ag.Think(ctx, snapshot)
+			if err != nil {
+				log.Printf("[tick %d] NPC %s 推理失败: %v", snapshot.Tick, id, err)
+				state = ag.State
+				state.Tick = snapshot.Tick
+				state.GameTime = snapshot.GameTime
+			} else {
+				log.Printf("[tick %d] NPC %s 推理完成: %s %s", snapshot.Tick, id, state.Location, state.Action)
+			}
+			results <- agentResult{id: id, state: state}
+			// 立即推送这个 NPC 的结果
+			if onEvent != nil {
+				onEvent(StreamEvent{
+					Type:       "agent_update",
+					AgentState: &state,
+					GameTime:   snapshot.GameTime,
+					Tick:       snapshot.Tick,
+				})
+			}
+		}(agentIDs[i], a)
+	}
+
+	// 收集所有结果
 	var agentStates []schema.AgentState
 	var events []string
 	if playerEvent != "" {
 		events = append(events, playerEvent)
 	}
 	locations := make(map[string][]string)
-
-	// 将玩家加入地点
-	if w.PlayerState != nil {
-		locations[w.PlayerState.Location] = append(locations[w.PlayerState.Location], w.Player.ID)
+	if playerState != nil {
+		locations[playerState.Location] = append(locations[playerState.Location], playerID)
 	}
 
-	for id, a := range w.Agents {
-		// 将玩家行为注入 prompt：临时添加到世界事件中
-		origEvents := w.State.Events
-		if playerEvent != "" {
-			w.State.Events = append(w.State.Events, playerEvent)
+	for range agentList {
+		r := <-results
+		agentStates = append(agentStates, r.state)
+		locations[r.state.Location] = append(locations[r.state.Location], r.id)
+		if r.state.Dialogue != nil {
+			if ag, ok := w.Agents[r.id]; ok {
+				events = append(events, fmt.Sprintf("%s 说：%s", ag.Config.Name, *r.state.Dialogue))
+			}
 		}
-		state, err := a.Think(ctx, w.State)
-		w.State.Events = origEvents
-
-		if err != nil {
-			log.Printf("agent %s error: %v", id, err)
-			state = a.State
-			state.Tick = w.State.Tick
+		if ag, ok := w.Agents[r.id]; ok {
+			events = append(events, fmt.Sprintf("%s 在%s%s", ag.Config.Name, r.state.Location, r.state.Action))
 		}
-		agentStates = append(agentStates, state)
-		locations[state.Location] = append(locations[state.Location], id)
-
-		if state.Dialogue != nil {
-			events = append(events, fmt.Sprintf("%s 说：%s", a.Config.Name, *state.Dialogue))
-		}
-		events = append(events, fmt.Sprintf("%s 在%s%s", a.Config.Name, state.Location, state.Action))
 	}
 
+	// 重新加锁，更新最终状态
+	w.mu.Lock()
 	w.State.Agents = agentStates
 	w.State.Locations = locations
 	w.State.Events = events
 	w.History = append(w.History, w.State)
+	finalState := w.State
 
-	if w.OnTick != nil {
-		w.OnTick(w.State)
+	// 检测是否有 NPC 对玩家说话 → 暂停等待玩家响应
+	if w.Player != nil && w.Mode == schema.ModeRunning {
+		for _, a := range agentStates {
+			if a.Target != nil && *a.Target == w.Player.ID && a.Dialogue != nil {
+				w.Mode = schema.ModePaused
+				log.Printf("[tick %d] NPC %s 对玩家说话，世界暂停等待响应", w.State.Tick, a.AgentID)
+				break
+			}
+		}
 	}
-	return TickResponse{State: w.State, PlayerState: w.PlayerState}
+
+	ps := w.PlayerState
+	w.mu.Unlock()
+
+	// 推送完整状态（tick 结束）
+	if w.OnTick != nil {
+		w.OnTick(finalState)
+	}
+
+	// 自动存档
+	saveData := schema.SaveData{State: finalState, Player: w.Player, PlayerState: ps}
+	if err := storage.SaveTick(saveData); err != nil {
+		log.Printf("[tick %d] 存档失败: %v", finalState.Tick, err)
+	}
+
+	return TickResponse{State: finalState, PlayerState: ps}
 }
 
 // applyPlayerAction 执行玩家行动，返回事件描述。
@@ -187,11 +300,29 @@ func (w *World) applyPlayerAction() string {
 	return ""
 }
 
-// SubmitAction 提交玩家行动。
+// SubmitAction 提交玩家行动。如果世界暂停中，自动恢复运行。
 func (w *World) SubmitAction(action schema.PlayerAction) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.PendingAction = &action
+	if w.Mode == schema.ModePaused {
+		w.Mode = schema.ModeRunning
+		log.Printf("[world] 玩家提交行动，恢复运行")
+	}
+}
+
+// GetMode 返回当前运行模式。
+func (w *World) GetMode() schema.SimulationMode {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.Mode
+}
+
+// SetMode 设置运行模式。
+func (w *World) SetMode(m schema.SimulationMode) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.Mode = m
 }
 
 // JoinPlayer 玩家加入世界。
@@ -303,7 +434,7 @@ func (w *World) StartConversation(playerID, npcID string) error {
 		StartTick: w.State.Tick,
 		Active:    true,
 	}
-	w.Mode = schema.ModeSlow
+	w.Mode = schema.ModePaused
 	return nil
 }
 
@@ -336,6 +467,6 @@ func (w *World) EndConversation() string {
 	summary := fmt.Sprintf("玩家与%s进行了一段对话（共%d轮）", npcName, len(w.Conversation.History))
 	w.State.Events = append(w.State.Events, summary)
 	w.Conversation.Active = false
-	w.Mode = schema.ModeAuto
+	w.Mode = schema.ModeRunning
 	return summary
 }

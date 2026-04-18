@@ -11,19 +11,21 @@ import (
 	"time"
 
 	"github.com/claw-works/fable/internal/schema"
+	"github.com/claw-works/fable/internal/storage"
 	"github.com/claw-works/fable/internal/world"
 	"github.com/gorilla/websocket"
 )
 
 // Server 是 Fable 的 HTTP 服务。
 type Server struct {
-	world    *world.World
-	cfg      schema.Config
-	upgrader websocket.Upgrader
-	clients  map[*websocket.Conn]bool
-	mu       sync.Mutex
-	cancel   context.CancelFunc
-	running  bool
+	world     *world.World
+	cfg       schema.Config
+	upgrader  websocket.Upgrader
+	clients   map[*websocket.Conn]bool
+	mu        sync.Mutex
+	cancel    context.CancelFunc
+	running   bool
+	wsCh chan []byte // 串行化 WebSocket 写入
 }
 
 // New 创建一个新的 Server。
@@ -34,9 +36,12 @@ func New(w *world.World, cfg schema.Config) *Server {
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
-		clients: make(map[*websocket.Conn]bool),
+		clients:   make(map[*websocket.Conn]bool),
+		wsCh:      make(chan []byte, 64),
 	}
+	go s.writeLoop()
 	w.OnTick = s.broadcast
+	w.OnEvent = s.broadcastEvent
 	return s
 }
 
@@ -46,6 +51,7 @@ func (s *Server) Run() error {
 
 	// 静态文件
 	mux.Handle("/frontend/", http.StripPrefix("/frontend/", http.FileServer(http.Dir("frontend"))))
+	mux.Handle("/frontend-pixel/", http.StripPrefix("/frontend-pixel/", http.FileServer(http.Dir("frontend-pixel"))))
 	mux.Handle("/admin/", http.StripPrefix("/admin/", http.FileServer(http.Dir("admin"))))
 
 	// API
@@ -71,6 +77,11 @@ func (s *Server) Run() error {
 	mux.HandleFunc("/api/conversation/end", s.handleConvEnd)
 	mux.HandleFunc("/api/conversation/history", s.handleConvHistory)
 
+	// 查询 API
+	mux.HandleFunc("/api/query/agent", s.handleQueryAgent)
+	mux.HandleFunc("/api/query/tick", s.handleQueryTick)
+	mux.HandleFunc("/api/query/location", s.handleQueryLocation)
+
 	// 根路径重定向到观察端
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/" {
@@ -92,12 +103,50 @@ func (s *Server) broadcast(state schema.WorldState) {
 		log.Printf("broadcast marshal error: %v", err)
 		return
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for conn := range s.clients {
-		if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
-			conn.Close()
-			delete(s.clients, conn)
+	s.sendToClients(data)
+}
+
+// broadcastEvent 向所有客户端推送增量事件（NPC 推理完成时立即调用）。
+func (s *Server) broadcastEvent(event world.StreamEvent) {
+	data, err := json.Marshal(event)
+	if err != nil {
+		return
+	}
+	s.sendToClients(data)
+}
+
+// sendToClients 非阻塞地向所有 WebSocket 客户端发送消息。
+func (s *Server) sendToClients(data []byte) {
+	select {
+	case s.wsCh <- data:
+	default:
+		if s.cfg.DevMode {
+			log.Println("[dev] broadcast channel 已满，丢弃消息")
+		}
+	}
+}
+
+// writeLoop 单 goroutine 串行写入所有 WebSocket 客户端，避免并发写 panic。
+func (s *Server) writeLoop() {
+	for data := range s.wsCh {
+		s.mu.Lock()
+		clients := make([]*websocket.Conn, 0, len(s.clients))
+		for conn := range s.clients {
+			clients = append(clients, conn)
+		}
+		s.mu.Unlock()
+
+		for _, conn := range clients {
+			conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+			if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
+				if s.cfg.DevMode {
+					log.Printf("[dev] ws 写入失败，断开连接: %v", err)
+				}
+				conn.Close()
+				s.mu.Lock()
+				delete(s.clients, conn)
+				s.mu.Unlock()
+			}
 		}
 	}
 }
@@ -136,7 +185,14 @@ func (s *Server) handleTick(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if s.cfg.DevMode {
+		log.Println("[dev] POST /api/tick 收到请求")
+	}
 	resp := s.world.Tick(r.Context())
+	if s.cfg.DevMode {
+		log.Printf("[dev] POST /api/tick 完成, tick=%d, agents=%d, waiting=%v",
+			resp.State.Tick, len(resp.State.Agents), resp.WaitingForPlayer)
+	}
 	writeJSON(w, resp)
 }
 
@@ -148,6 +204,9 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	if s.running {
 		s.mu.Unlock()
+		if s.cfg.DevMode {
+			log.Println("[dev] POST /api/start → already running")
+		}
 		writeJSON(w, map[string]string{"status": "already running"})
 		return
 	}
@@ -156,15 +215,54 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 	s.running = true
 	s.mu.Unlock()
 
+	if s.cfg.DevMode {
+		log.Printf("[dev] POST /api/start → 启动自动运行, interval=%ds", s.cfg.Simulation.TickInterval)
+	}
+	s.world.SetMode(schema.ModeRunning)
+
 	go func() {
-		ticker := time.NewTicker(time.Duration(s.cfg.Simulation.TickInterval) * time.Second)
-		defer ticker.Stop()
+		pauseTimeout := 30 * time.Second
+		pauseStart := time.Time{}
 		for {
 			select {
 			case <-ctx.Done():
+				if s.cfg.DevMode {
+					log.Println("[dev] 自动运行已停止")
+				}
+				s.world.SetMode(schema.ModeIdle)
 				return
-			case <-ticker.C:
-				s.world.Tick(ctx)
+			default:
+			}
+
+			mode := s.world.GetMode()
+			if mode == schema.ModePaused {
+				// 暂停中，等玩家响应或超时
+				if pauseStart.IsZero() {
+					pauseStart = time.Now()
+				}
+				if time.Since(pauseStart) > pauseTimeout {
+					if s.cfg.DevMode {
+						log.Println("[dev] 暂停超时 30s，自动恢复运行")
+					}
+					s.world.SetMode(schema.ModeRunning)
+					pauseStart = time.Time{}
+				}
+				time.Sleep(500 * time.Millisecond)
+				continue
+			}
+			pauseStart = time.Time{}
+
+			if s.cfg.DevMode {
+				log.Println("[dev] 自动运行: 触发 tick")
+			}
+			s.world.Tick(ctx)
+			if s.cfg.DevMode {
+				log.Printf("[dev] tick 完成，等待 %ds", s.cfg.Simulation.TickInterval)
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(time.Duration(s.cfg.Simulation.TickInterval) * time.Second):
 			}
 		}
 	}()
@@ -175,6 +273,9 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
+	}
+	if s.cfg.DevMode {
+		log.Println("[dev] POST /api/stop")
 	}
 	s.mu.Lock()
 	if s.cancel != nil {
@@ -335,4 +436,48 @@ func (s *Server) handleConvHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, conv)
+}
+
+// GET /api/query/agent?id=lao_chen&limit=50
+func (s *Server) handleQueryAgent(w http.ResponseWriter, r *http.Request) {
+	agentID := r.URL.Query().Get("id")
+	if agentID == "" {
+		http.Error(w, "missing id", 400)
+		return
+	}
+	limit := 50
+	if v := r.URL.Query().Get("limit"); v != "" {
+		fmt.Sscanf(v, "%d", &limit)
+	}
+	results, err := storage.QueryAgentHistory(agentID, limit)
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	writeJSON(w, results)
+}
+
+// GET /api/query/tick?tick=5
+func (s *Server) handleQueryTick(w http.ResponseWriter, r *http.Request) {
+	var tick int
+	fmt.Sscanf(r.URL.Query().Get("tick"), "%d", &tick)
+	state, err := storage.QueryTickState(tick)
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	writeJSON(w, state)
+}
+
+// GET /api/query/location?name=茶馆&tick=5
+func (s *Server) handleQueryLocation(w http.ResponseWriter, r *http.Request) {
+	name := r.URL.Query().Get("name")
+	var tick int
+	fmt.Sscanf(r.URL.Query().Get("tick"), "%d", &tick)
+	results, err := storage.QueryAgentsByLocation(name, tick)
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	writeJSON(w, results)
 }

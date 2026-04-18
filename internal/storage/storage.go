@@ -1,7 +1,8 @@
-// Package storage 管理 ~/.fable 目录结构、世界安装和存档。
+// Package storage 管理 ~/.fable 目录结构、世界安装和 SQLite 存档。
 package storage
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 
 	"github.com/claw-works/fable/internal/schema"
+	_ "modernc.org/sqlite"
 	"gopkg.in/yaml.v3"
 )
 
@@ -21,15 +23,254 @@ func FableDir() string {
 // WorldsDir 返回 ~/.fable/worlds 目录。
 func WorldsDir() string { return filepath.Join(FableDir(), "worlds") }
 
-// SavesDir 返回 ~/.fable/saves 目录。
-func SavesDir() string { return filepath.Join(FableDir(), "saves") }
-
 // ConfigPath 返回 ~/.fable/config.yaml 路径。
 func ConfigPath() string { return filepath.Join(FableDir(), "config.yaml") }
 
+// DB 是当前存档的数据库连接。
+var DB *sql.DB
+
+// InitDB 打开或创建 ~/.fable/saves/{worldID}/{saveName}.db 并建表。
+func InitDB(worldID, saveName string) error {
+	dir := filepath.Join(FableDir(), "saves", worldID)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+	dbPath := filepath.Join(dir, saveName+".db")
+	var err error
+	DB, err = sql.Open("sqlite", dbPath)
+	if err != nil {
+		return fmt.Errorf("open db: %w", err)
+	}
+	if _, err := DB.Exec("PRAGMA journal_mode=WAL"); err != nil {
+		return err
+	}
+	_, err = DB.Exec(createSQL)
+	return err
+}
+
+const createSQL = `
+CREATE TABLE IF NOT EXISTS ticks (
+	tick       INTEGER PRIMARY KEY,
+	game_time  TEXT NOT NULL,
+	state_json TEXT NOT NULL,
+	created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS agent_states (
+	id            INTEGER PRIMARY KEY AUTOINCREMENT,
+	tick          INTEGER NOT NULL,
+	agent_id      TEXT NOT NULL,
+	name          TEXT NOT NULL,
+	location      TEXT NOT NULL,
+	action        TEXT NOT NULL DEFAULT '',
+	dialogue      TEXT,
+	emotion       TEXT NOT NULL DEFAULT '',
+	inner_thought TEXT NOT NULL DEFAULT '',
+	memory_json   TEXT,
+	created_at    DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_states_agent ON agent_states(agent_id, tick);
+CREATE INDEX IF NOT EXISTS idx_agent_states_location ON agent_states(location, tick);
+
+CREATE TABLE IF NOT EXISTS player_data (
+	id          INTEGER PRIMARY KEY CHECK (id = 1),
+	config_json TEXT,
+	state_json  TEXT
+);
+`
+
+// SaveTick 保存一个 Tick 的完整数据。
+func SaveTick(data schema.SaveData) error {
+	stateJSON, err := json.Marshal(data.State)
+	if err != nil {
+		return err
+	}
+
+	tx, err := DB.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	_, err = tx.Exec(
+		`INSERT OR REPLACE INTO ticks (tick, game_time, state_json) VALUES (?, ?, ?)`,
+		data.State.Tick, data.State.GameTime, string(stateJSON),
+	)
+	if err != nil {
+		return err
+	}
+
+	stmt, err := tx.Prepare(
+		`INSERT INTO agent_states (tick, agent_id, name, location, action, dialogue, emotion, inner_thought, memory_json)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	for _, a := range data.State.Agents {
+		memJSON, _ := json.Marshal(a.MemoryUpdate)
+		_, err = stmt.Exec(data.State.Tick, a.AgentID, a.Name, a.Location,
+			a.Action, a.Dialogue, a.Emotion, a.InnerThought, string(memJSON))
+		if err != nil {
+			return err
+		}
+	}
+
+	if data.Player != nil || data.PlayerState != nil {
+		cfgJSON, _ := json.Marshal(data.Player)
+		psJSON, _ := json.Marshal(data.PlayerState)
+		_, err = tx.Exec(
+			`INSERT OR REPLACE INTO player_data (id, config_json, state_json) VALUES (1, ?, ?)`,
+			string(cfgJSON), string(psJSON),
+		)
+		if err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
+// LoadLatestSave 加载最新的存档快照。
+func LoadLatestSave() (*schema.SaveData, error) {
+	var stateJSON string
+	err := DB.QueryRow(
+		`SELECT state_json FROM ticks ORDER BY tick DESC LIMIT 1`,
+	).Scan(&stateJSON)
+	if err != nil {
+		return nil, err
+	}
+
+	var data schema.SaveData
+	if err := json.Unmarshal([]byte(stateJSON), &data.State); err != nil {
+		return nil, err
+	}
+
+	var cfgJSON, psJSON sql.NullString
+	err = DB.QueryRow(`SELECT config_json, state_json FROM player_data WHERE id=1`).Scan(&cfgJSON, &psJSON)
+	if err == nil {
+		if cfgJSON.Valid {
+			var pc schema.PlayerConfig
+			if json.Unmarshal([]byte(cfgJSON.String), &pc) == nil {
+				data.Player = &pc
+			}
+		}
+		if psJSON.Valid {
+			var ps schema.PlayerState
+			if json.Unmarshal([]byte(psJSON.String), &ps) == nil {
+				data.PlayerState = &ps
+			}
+		}
+	}
+
+	return &data, nil
+}
+
+// QueryAgentHistory 查询某个 NPC 的历史状态。
+func QueryAgentHistory(agentID string, limit int) ([]schema.AgentState, error) {
+	rows, err := DB.Query(
+		`SELECT tick, name, location, action, dialogue, emotion, inner_thought, memory_json
+		 FROM agent_states WHERE agent_id=? ORDER BY tick DESC LIMIT ?`,
+		agentID, limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []schema.AgentState
+	for rows.Next() {
+		var a schema.AgentState
+		var dialogue sql.NullString
+		var memJSON string
+		if err := rows.Scan(&a.Tick, &a.Name, &a.Location, &a.Action, &dialogue, &a.Emotion, &a.InnerThought, &memJSON); err != nil {
+			return nil, err
+		}
+		a.AgentID = agentID
+		if dialogue.Valid {
+			a.Dialogue = &dialogue.String
+		}
+		json.Unmarshal([]byte(memJSON), &a.MemoryUpdate)
+		results = append(results, a)
+	}
+	return results, nil
+}
+
+// QueryTickState 查询某个 Tick 的完整快照。
+func QueryTickState(tick int) (*schema.WorldState, error) {
+	var stateJSON string
+	err := DB.QueryRow(`SELECT state_json FROM ticks WHERE tick=?`, tick).Scan(&stateJSON)
+	if err != nil {
+		return nil, err
+	}
+	var state schema.WorldState
+	if err := json.Unmarshal([]byte(stateJSON), &state); err != nil {
+		return nil, err
+	}
+	return &state, nil
+}
+
+// QueryAgentsByLocation 查询某个地点在某个 Tick 的所有 NPC。
+func QueryAgentsByLocation(location string, tick int) ([]schema.AgentState, error) {
+	rows, err := DB.Query(
+		`SELECT agent_id, name, action, dialogue, emotion, inner_thought
+		 FROM agent_states WHERE location=? AND tick=?`,
+		location, tick,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []schema.AgentState
+	for rows.Next() {
+		var a schema.AgentState
+		var dialogue sql.NullString
+		if err := rows.Scan(&a.AgentID, &a.Name, &a.Action, &dialogue, &a.Emotion, &a.InnerThought); err != nil {
+			return nil, err
+		}
+		a.Location = location
+		a.Tick = tick
+		if dialogue.Valid {
+			a.Dialogue = &dialogue.String
+		}
+		results = append(results, a)
+	}
+	return results, nil
+}
+
+// SaveLastSession 记录上次使用的世界和存档（写文件，跨存档）。
+func SaveLastSession(s schema.LastSession) error {
+	if err := os.MkdirAll(FableDir(), 0755); err != nil {
+		return err
+	}
+	data, err := yaml.Marshal(s)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(FableDir(), "last_session.yaml"), data, 0644)
+}
+
+// LoadLastSession 读取上次会话信息。
+func LoadLastSession() (*schema.LastSession, error) {
+	data, err := os.ReadFile(filepath.Join(FableDir(), "last_session.yaml"))
+	if err != nil {
+		return nil, err
+	}
+	var s schema.LastSession
+	if err := yaml.Unmarshal(data, &s); err != nil {
+		return nil, err
+	}
+	return &s, nil
+}
+
+// ── 以下为文件系统工具函数（Init、ListWorlds 等不变）──
+
 // Init 初始化 ~/.fable 目录结构，首次运行时复制内置示例世界。
 func Init(builtinWorldsDir string) error {
-	dirs := []string{FableDir(), WorldsDir(), SavesDir()}
+	dirs := []string{FableDir(), WorldsDir()}
 	for _, d := range dirs {
 		if err := os.MkdirAll(d, 0755); err != nil {
 			return fmt.Errorf("create dir %s: %w", d, err)
@@ -87,33 +328,6 @@ func ListWorlds() ([]schema.WorldManifest, error) {
 		}
 	}
 	return worlds, nil
-}
-
-// SaveWorld 保存当前世界状态到 ~/.fable/saves/{worldID}/latest.json。
-func SaveWorld(worldID string, state schema.WorldState) error {
-	dir := filepath.Join(SavesDir(), worldID)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return err
-	}
-	data, err := json.MarshalIndent(state, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(filepath.Join(dir, "latest.json"), data, 0644)
-}
-
-// LoadLatestSave 加载最近存档。
-func LoadLatestSave(worldID string) (*schema.WorldState, error) {
-	path := filepath.Join(SavesDir(), worldID, "latest.json")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	var state schema.WorldState
-	if err := json.Unmarshal(data, &state); err != nil {
-		return nil, err
-	}
-	return &state, nil
 }
 
 func copyDir(src, dst string) error {

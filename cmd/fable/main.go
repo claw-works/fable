@@ -39,13 +39,28 @@ func main() {
 	}
 
 	worldDir := resolveWorldDir(*worldFlag)
+	worldID := filepath.Base(worldDir)
+
+	// 确定存档名：优先用上次会话，否则 "default"
+	saveName := "default"
+	if last, err := storage.LoadLastSession(); err == nil && last.WorldID == worldID {
+		saveName = last.SaveName
+	}
+
+	// 初始化 SQLite（每个存档一个 db）
+	if err := storage.InitDB(worldID, saveName); err != nil {
+		log.Fatalf("init db: %v", err)
+	}
 
 	llmClient := llm.New(cfg.LLM)
 
-	w, err := world.Load(worldDir, llmClient)
+	w, err := world.Load(worldDir, saveName, llmClient)
 	if err != nil {
 		log.Fatalf("load world: %v", err)
 	}
+
+	// 记住本次会话
+	storage.SaveLastSession(schema.LastSession{WorldID: worldID, SaveName: saveName})
 
 	fmt.Printf("🏘  Fable - %s\n", w.Config.Name)
 	fmt.Printf("📍 地点: %d 个 | 👥 角色: %d 个\n", len(w.Config.Locations), len(w.Agents))
