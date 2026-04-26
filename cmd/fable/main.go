@@ -66,7 +66,7 @@ func main() {
 	fmt.Printf("📍 地点: %d 个 | 👥 角色: %d 个\n", len(w.Config.Locations), len(w.Agents))
 	fmt.Printf("🌐 http://localhost:%d\n", cfg.Server.Port)
 
-	srv := server.New(w, *cfg)
+	srv := server.New(w, *cfg, llmClient)
 	if err := srv.Run(); err != nil {
 		log.Fatalf("server error: %v", err)
 	}

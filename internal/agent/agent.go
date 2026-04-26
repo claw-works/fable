@@ -34,6 +34,9 @@ func New(cfg schema.AgentConfig, llmClient *llm.Client) *Agent {
 	}
 }
 
+// LLMClient 返回 Agent 的 LLM 客户端。
+func (a *Agent) LLMClient() *llm.Client { return a.llm }
+
 // Think 让 Agent 根据当前世界状态进行思考并产生行动。
 func (a *Agent) Think(ctx context.Context, world schema.WorldState) (schema.AgentState, error) {
 	filtered := FilterWorldStateForAgent(world, a.Config.ID)

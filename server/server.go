@@ -7,9 +7,12 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
+	"github.com/claw-works/fable/internal/llm"
 	"github.com/claw-works/fable/internal/schema"
 	"github.com/claw-works/fable/internal/storage"
 	"github.com/claw-works/fable/internal/world"
@@ -20,6 +23,7 @@ import (
 type Server struct {
 	world     *world.World
 	cfg       schema.Config
+	llm       *llm.Client
 	upgrader  websocket.Upgrader
 	clients   map[*websocket.Conn]bool
 	mu        sync.Mutex
@@ -29,10 +33,11 @@ type Server struct {
 }
 
 // New 创建一个新的 Server。
-func New(w *world.World, cfg schema.Config) *Server {
+func New(w *world.World, cfg schema.Config, llmClient *llm.Client) *Server {
 	s := &Server{
 		world: w,
 		cfg:   cfg,
+		llm:   llmClient,
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
@@ -81,6 +86,11 @@ func (s *Server) Run() error {
 	mux.HandleFunc("/api/query/agent", s.handleQueryAgent)
 	mux.HandleFunc("/api/query/tick", s.handleQueryTick)
 	mux.HandleFunc("/api/query/location", s.handleQueryLocation)
+
+	// 游戏管理 API
+	mux.HandleFunc("/api/worlds", s.handleListWorlds)
+	mux.HandleFunc("/api/saves", s.handleListSaves)
+	mux.HandleFunc("/api/new-game", s.handleNewGame)
 
 	// 根路径重定向到观察端
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -320,7 +330,14 @@ func (s *Server) handlePlayerJoin(w http.ResponseWriter, r *http.Request) {
 		cfg.InitLocation = "茶馆"
 	}
 	s.world.JoinPlayer(cfg)
-	writeJSON(w, map[string]string{"status": "joined", "player_id": cfg.ID})
+	// 玩家加入后自动停止自动运行，切换到手动模式
+	if s.cancel != nil {
+		s.cancel()
+		s.cancel = nil
+		s.running = false
+	}
+	s.world.SetMode(schema.ModeIdle)
+	writeJSON(w, map[string]string{"status": "joined", "player_id": cfg.ID, "name": cfg.Name})
 }
 
 // handlePlayerLeave 玩家离开模拟。
@@ -399,7 +416,13 @@ func (s *Server) handleConvSay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.world.AddConversationTurn("player", body.Content)
-	writeJSON(w, map[string]string{"status": "ok"})
+	// NPC 用 LLM 回复
+	reply, err := s.world.ConversationReply(r.Context())
+	if err != nil {
+		writeJSON(w, map[string]any{"player": body.Content, "reply": "", "error": err.Error()})
+		return
+	}
+	writeJSON(w, map[string]any{"player": body.Content, "reply": reply})
 }
 
 func (s *Server) handleConvAction(w http.ResponseWriter, r *http.Request) {
@@ -480,4 +503,83 @@ func (s *Server) handleQueryLocation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, results)
+}
+
+// GET /api/worlds — 列出可用世界
+func (s *Server) handleListWorlds(w http.ResponseWriter, r *http.Request) {
+	dirs, err := storage.ListWorldDirs()
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	writeJSON(w, dirs)
+}
+
+// GET /api/saves?world=qingshui-town — 列出某世界的存档
+func (s *Server) handleListSaves(w http.ResponseWriter, r *http.Request) {
+	worldID := r.URL.Query().Get("world")
+	if worldID == "" {
+		worldID = s.world.WorldID
+	}
+	saves, err := storage.ListSaves(worldID)
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	writeJSON(w, saves)
+}
+
+// POST /api/new-game {world_id, save_name}
+func (s *Server) handleNewGame(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		WorldID  string `json:"world_id"`
+		SaveName string `json:"save_name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", 400)
+		return
+	}
+	if req.WorldID == "" || req.SaveName == "" {
+		http.Error(w, "world_id and save_name required", 400)
+		return
+	}
+
+	// 停止当前自动运行
+	if s.cancel != nil {
+		s.cancel()
+		s.cancel = nil
+		s.running = false
+	}
+
+	// 找到世界目录
+	worldDir := filepath.Join(storage.WorldsDir(), req.WorldID)
+	if _, err := os.Stat(worldDir); os.IsNotExist(err) {
+		// 尝试项目内置目录
+		worldDir = filepath.Join("worlds", req.WorldID)
+	}
+
+	// 切换 DB
+	if err := storage.InitDB(req.WorldID, req.SaveName); err != nil {
+		http.Error(w, "init db: "+err.Error(), 500)
+		return
+	}
+
+	// 重新加载世界
+	newWorld, err := world.Load(worldDir, req.SaveName, s.llm)
+	if err != nil {
+		http.Error(w, "load world: "+err.Error(), 500)
+		return
+	}
+	newWorld.OnTick = s.broadcast
+	newWorld.OnEvent = s.broadcastEvent
+	s.world = newWorld
+
+	// 记住会话
+	storage.SaveLastSession(schema.LastSession{WorldID: req.WorldID, SaveName: req.SaveName})
+
+	writeJSON(w, map[string]any{
+		"world_id":  req.WorldID,
+		"save_name": req.SaveName,
+		"tick":      newWorld.GetState().Tick,
+	})
 }

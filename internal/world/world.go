@@ -29,6 +29,7 @@ type StreamEvent struct {
 type World struct {
 	mu            sync.RWMutex
 	WorldID       string
+	WorldDir      string
 	SaveName      string
 	Manifest      *schema.WorldManifest
 	Config        schema.WorldConfig
@@ -92,6 +93,7 @@ func Load(dir string, saveName string, llmClient *llm.Client) (*World, error) {
 
 	w := &World{
 		WorldID:  worldID,
+		WorldDir: dir,
 		SaveName: saveName,
 		Manifest: manifest,
 		Config:   wCfg,
@@ -469,4 +471,45 @@ func (w *World) EndConversation() string {
 	w.Conversation.Active = false
 	w.Mode = schema.ModeRunning
 	return summary
+}
+
+// ConversationReply 让 NPC 用 LLM 回复对话，返回回复内容。
+func (w *World) ConversationReply(ctx context.Context) (string, error) {
+	w.mu.RLock()
+	conv := w.Conversation
+	if conv == nil || !conv.Active {
+		w.mu.RUnlock()
+		return "", fmt.Errorf("没有进行中的对话")
+	}
+	ag, ok := w.Agents[conv.NPCid]
+	if !ok {
+		w.mu.RUnlock()
+		return "", fmt.Errorf("NPC %s 不存在", conv.NPCid)
+	}
+	// 构建对话 prompt
+	var historyText string
+	for _, t := range conv.History {
+		if t.Speaker == "player" {
+			historyText += fmt.Sprintf("玩家：%s\n", t.Content)
+		} else {
+			historyText += fmt.Sprintf("%s：%s\n", ag.Config.Name, t.Content)
+		}
+	}
+	w.mu.RUnlock()
+
+	messages := []llm.Message{
+		{Role: "system", Content: fmt.Sprintf(
+			"你是%s，%s，性格：%s。背景：%s\n你正在和一个来到小镇的旅人对话。请用简短自然的口语回复，保持角色性格。只回复对话内容，不要加任何格式。",
+			ag.Config.Name, ag.Config.Occupation, ag.Config.Personality, ag.Config.Backstory,
+		)},
+		{Role: "user", Content: fmt.Sprintf("以下是对话记录：\n%s\n请以%s的身份回复：", historyText, ag.Config.Name)},
+	}
+
+	reply, err := ag.LLMClient().Chat(ctx, messages)
+	if err != nil {
+		return "", err
+	}
+
+	w.AddConversationTurn(conv.NPCid, reply)
+	return reply, nil
 }

@@ -31,6 +31,9 @@ var DB *sql.DB
 
 // InitDB 打开或创建 ~/.fable/saves/{worldID}/{saveName}.db 并建表。
 func InitDB(worldID, saveName string) error {
+	if DB != nil {
+		DB.Close()
+	}
 	dir := filepath.Join(FableDir(), "saves", worldID)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
@@ -267,6 +270,41 @@ func LoadLastSession() (*schema.LastSession, error) {
 }
 
 // ── 以下为文件系统工具函数（Init、ListWorlds 等不变）──
+
+// ListWorldDirs 列出 ~/.fable/worlds/ 下的目录名。
+func ListWorldDirs() ([]string, error) {
+	entries, err := os.ReadDir(WorldsDir())
+	if err != nil {
+		return nil, err
+	}
+	var dirs []string
+	for _, e := range entries {
+		if e.IsDir() {
+			dirs = append(dirs, e.Name())
+		}
+	}
+	return dirs, nil
+}
+
+// ListSaves 列出某个世界的所有存档名（.db 文件）。
+func ListSaves(worldID string) ([]string, error) {
+	dir := filepath.Join(FableDir(), "saves", worldID)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var saves []string
+	for _, e := range entries {
+		name := e.Name()
+		if !e.IsDir() && filepath.Ext(name) == ".db" {
+			saves = append(saves, name[:len(name)-3]) // 去掉 .db
+		}
+	}
+	return saves, nil
+}
 
 // Init 初始化 ~/.fable 目录结构，首次运行时复制内置示例世界。
 func Init(builtinWorldsDir string) error {
