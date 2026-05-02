@@ -29,7 +29,8 @@ type Server struct {
 	mu        sync.Mutex
 	cancel    context.CancelFunc
 	running   bool
-	wsCh chan []byte // 串行化 WebSocket 写入
+	wsCh      chan []byte // 串行化 WebSocket 写入
+	interrupt chan struct{} // 玩家操作中断信号
 }
 
 // New 创建一个新的 Server。
@@ -43,6 +44,7 @@ func New(w *world.World, cfg schema.Config, llmClient *llm.Client) *Server {
 		},
 		clients:   make(map[*websocket.Conn]bool),
 		wsCh:      make(chan []byte, 64),
+		interrupt: make(chan struct{}, 1),
 	}
 	go s.writeLoop()
 	w.OnTick = s.broadcast
@@ -58,14 +60,17 @@ func (s *Server) Run() error {
 	mux.Handle("/frontend/", http.StripPrefix("/frontend/", http.FileServer(http.Dir("frontend"))))
 	mux.Handle("/frontend-pixel/", http.StripPrefix("/frontend-pixel/", http.FileServer(http.Dir("frontend-pixel"))))
 	mux.Handle("/admin/", http.StripPrefix("/admin/", http.FileServer(http.Dir("admin"))))
+	mux.Handle("/xui/", http.StripPrefix("/xui/", http.FileServer(http.Dir("xui/dist"))))
 
 	// API
 	mux.HandleFunc("/api/state", s.handleState)
 	mux.HandleFunc("/api/tick", s.handleTick)
 	mux.HandleFunc("/api/start", s.handleStart)
 	mux.HandleFunc("/api/stop", s.handleStop)
+	mux.HandleFunc("/api/run", s.handleRun)
 	mux.HandleFunc("/api/config/world", s.handleWorldConfig)
 	mux.HandleFunc("/api/config/agents", s.handleAgentsConfig)
+	mux.HandleFunc("/api/session", s.handleSession)
 	mux.HandleFunc("/api/history", s.handleHistory)
 	mux.HandleFunc("/ws", s.handleWS)
 
@@ -74,6 +79,8 @@ func (s *Server) Run() error {
 	mux.HandleFunc("/api/player/leave", s.handlePlayerLeave)
 	mux.HandleFunc("/api/player/state", s.handlePlayerState)
 	mux.HandleFunc("/api/player/action", s.handlePlayerAction)
+	mux.HandleFunc("/api/player/interrupt", s.handlePlayerInterrupt)
+	mux.HandleFunc("/api/player/autopilot", s.handlePlayerAutopilot)
 
 	// Conversation API
 	mux.HandleFunc("/api/conversation/start", s.handleConvStart)
@@ -233,6 +240,7 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		pauseTimeout := 30 * time.Second
 		pauseStart := time.Time{}
+		tickWait := 20 * time.Second // 每 tick 后等待 20s，给玩家操作时间
 		for {
 			select {
 			case <-ctx.Done():
@@ -246,7 +254,6 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 
 			mode := s.world.GetMode()
 			if mode == schema.ModePaused {
-				// 暂停中，等玩家响应或超时
 				if pauseStart.IsZero() {
 					pauseStart = time.Now()
 				}
@@ -266,13 +273,27 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 				log.Println("[dev] 自动运行: 触发 tick")
 			}
 			s.world.Tick(ctx)
-			if s.cfg.DevMode {
-				log.Printf("[dev] tick 完成，等待 %ds", s.cfg.Simulation.TickInterval)
-			}
+
+			// 等待 20s，期间可被中断
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(time.Duration(s.cfg.Simulation.TickInterval) * time.Second):
+			case <-s.interrupt:
+				log.Println("[server] 玩家中断，暂停自动运行")
+				s.world.SetMode(schema.ModePaused)
+				// 等待恢复
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					default:
+					}
+					if s.world.GetMode() != schema.ModePaused {
+						break
+					}
+					time.Sleep(300 * time.Millisecond)
+				}
+			case <-time.After(tickWait):
 			}
 		}
 	}()
@@ -296,6 +317,116 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]string{"status": "stopped"})
 }
 
+// POST /api/run {"ticks": 10} — 运行指定步数后自动停止
+func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		Ticks int `json:"ticks"`
+	}
+	json.NewDecoder(r.Body).Decode(&body)
+	if body.Ticks <= 0 || body.Ticks > 200 {
+		body.Ticks = 10
+	}
+
+	s.mu.Lock()
+	if s.running {
+		s.mu.Unlock()
+		writeJSON(w, map[string]string{"status": "already running"})
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	s.cancel = cancel
+	s.running = true
+	s.mu.Unlock()
+
+	s.world.SetMode(schema.ModeRunning)
+	tickWait := 20 * time.Second
+	target := body.Ticks
+
+	go func() {
+		defer func() {
+			s.mu.Lock()
+			s.running = false
+			s.mu.Unlock()
+			s.world.SetMode(schema.ModeIdle)
+		}()
+		for i := 0; i < target; i++ {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			if s.world.GetMode() == schema.ModePaused {
+				// 等待恢复或取消
+				for s.world.GetMode() == schema.ModePaused {
+					select {
+					case <-ctx.Done():
+						return
+					default:
+						time.Sleep(300 * time.Millisecond)
+					}
+				}
+			}
+			s.world.Tick(ctx)
+			if i < target-1 { // 最后一步不等待
+				select {
+				case <-ctx.Done():
+					return
+				case <-s.interrupt:
+					s.world.SetMode(schema.ModePaused)
+					for s.world.GetMode() == schema.ModePaused {
+						select {
+						case <-ctx.Done():
+							return
+						default:
+							time.Sleep(300 * time.Millisecond)
+						}
+					}
+				case <-time.After(tickWait):
+				}
+			}
+		}
+		log.Printf("[server] 运行 %d 步完成", target)
+	}()
+
+	writeJSON(w, map[string]any{"status": "running", "ticks": target})
+}
+
+// POST /api/player/interrupt — 玩家中断自动运行
+func (s *Server) handlePlayerInterrupt(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	select {
+	case s.interrupt <- struct{}{}:
+		writeJSON(w, map[string]string{"status": "interrupted"})
+	default:
+		writeJSON(w, map[string]string{"status": "already_paused"})
+	}
+}
+
+// POST /api/player/autopilot {"enabled": true/false}
+func (s *Server) handlePlayerAutopilot(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		Enabled bool `json:"enabled"`
+	}
+	json.NewDecoder(r.Body).Decode(&body)
+	s.world.Autopilot = body.Enabled
+	writeJSON(w, map[string]any{"autopilot": body.Enabled})
+}
+
+func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, map[string]string{"world_id": s.world.WorldID, "save_name": s.world.SaveName})
+}
+
 func (s *Server) handleWorldConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, s.world.Config)
 }
@@ -309,7 +440,17 @@ func (s *Server) handleAgentsConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, s.world.History)
+	limit := 100
+	if v := r.URL.Query().Get("limit"); v != "" {
+		fmt.Sscanf(v, "%d", &limit)
+	}
+	states, err := storage.QueryRecentTicks(limit)
+	if err != nil {
+		// fallback 到内存
+		writeJSON(w, s.world.History)
+		return
+	}
+	writeJSON(w, states)
 }
 
 // handlePlayerJoin 创建玩家角色加入模拟。
@@ -372,6 +513,11 @@ func (s *Server) handlePlayerAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.world.SubmitAction(action)
+	// 玩家操作自动中断自动运行等待
+	select {
+	case s.interrupt <- struct{}{}:
+	default:
+	}
 	writeJSON(w, map[string]string{"status": "submitted"})
 }
 

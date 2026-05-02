@@ -7,7 +7,10 @@
 
   // tickCards: [{ tick, time, agentId, name, emotion, location, items: [{icon,label,text,cls}] }]
   let tickCards = [];
+  let tickCardKeys = new Set(); // 去重
   let focusAgent = null; // 聚焦的 agent_id
+  let agentNames = {}; // agent_id -> display name
+  let playerName = ''; // 玩家名字
 
   async function loadWorldConfig() {
     try {
@@ -20,6 +23,12 @@
         moveSelect.add(new Option(loc.name, loc.name));
       });
     } catch (e) { console.error("load config:", e); }
+    // 构建 agent_id -> name 映射
+    try {
+      const res = await fetch("/api/config/agents");
+      const agents = await res.json();
+      (agents || []).forEach(a => { if (a.id && a.name) agentNames[a.id] = a.name; });
+    } catch (e) { console.error("load agents:", e); }
   }
 
   async function checkPlayerState() {
@@ -38,7 +47,11 @@
     ws.onmessage = (e) => {
       try {
         const msg = JSON.parse(e.data);
-        if (msg.type === 'agent_update' && msg.agent_state) {
+        if (msg.type === 'tick_start') {
+          lockPlayerUI(true, msg.tick);
+        } else if (msg.type === 'tick_end') {
+          lockPlayerUI(false, msg.tick);
+        } else if (msg.type === 'agent_update' && msg.agent_state) {
           const a = msg.agent_state;
           if (lastState) {
             const idx = lastState.agents.findIndex(x => x.agent_id === a.agent_id);
@@ -58,7 +71,7 @@
           $("#tick-count").textContent = `Tick: ${msg.tick}`;
           addAgentTickCard(a, msg.tick, msg.game_time);
           // NPC 对玩家说话 → 加到玩家日志
-          if (a.dialogue && a.target === (playerJoined ? 'player' : null)) {
+          if (a.dialogue && playerJoined && (a.target === 'player' || a.target === playerName)) {
             addPlayerLog(`💬 ${a.name || a.agent_id} 对你说：「${a.dialogue}」`, msg.tick, msg.game_time);
           }
           renderLocations();
@@ -97,42 +110,67 @@
       items,
     };
     if (existing) Object.assign(existing, card);
-    else tickCards.push(card);
+    else { tickCards.push(card); tickCardKeys.add(key); }
 
-    if (tickCards.length > 300) tickCards = tickCards.slice(-300);
+    if (tickCards.length > 300) {
+      const removed = tickCards.splice(0, tickCards.length - 300);
+      removed.forEach(c => tickCardKeys.delete(c.key));
+    }
   }
 
-  // 玩家事件：累积到当前 tick 的玩家卡片
   function addPlayerEventCard(text, tick, time) {
     if (!text) return;
-    const key = `${tick}::player`;
-    const existing = tickCards.find(c => c.key === key);
+    const cardKey = `${tick}::player`;
+    const itemKey = `${tick}::player::${text}`;
+    if (tickCardKeys.has(itemKey)) return; // 完全重复，跳过
+    tickCardKeys.add(itemKey);
+
+    const existing = tickCards.find(c => c.key === cardKey);
     const item = { icon: '🎭', label: '玩家', text: text.replace(/^【玩家】/, ''), cls: 'player-event' };
     if (existing) {
-      existing.items.push(item);
+      // 检查是否已有相同文本
+      if (!existing.items.some(i => i.text === item.text)) {
+        existing.items.push(item);
+      }
     } else {
       const ps = lastState && lastState.agents ? (lastState.agents.find(x => x.agent_id === 'player')) : null;
       tickCards.push({
-        key, tick, time,
+        key: cardKey, tick, time,
         agentId: 'player',
-        name: (ps && ps.name) || '玩家',
+        name: playerName || (ps && ps.name) || '玩家',
         emotion: ps ? ps.emotion : '',
         location: ps ? ps.location : '',
         items: [item],
         isPlayer: true,
       });
+      tickCardKeys.add(cardKey);
     }
-    if (tickCards.length > 300) tickCards = tickCards.slice(-300);
+    if (tickCards.length > 300) {
+      const removed = tickCards.splice(0, tickCards.length - 300);
+      removed.forEach(c => tickCardKeys.delete(c.key));
+    }
   }
 
   function ingestFullState(state) {
     (state.agents || []).forEach(a => addAgentTickCard(a, state.tick, state.game_time));
-    // 玩家状态也作为一张卡片
-    // 注：后端 PlayerState 不在 agents 里，由 loadCurrentState 单独处理
+    // 事件也注入（包含玩家事件）
+    (state.events || []).forEach(e => {
+      if (e.startsWith('【玩家】') || e.startsWith('【')) {
+        addPlayerEventCard(e, state.tick, state.game_time);
+        // 恢复玩家日志
+        addPlayerLog(e, state.tick, state.game_time);
+      }
+    });
   }
 
   async function loadCurrentState() {
     try {
+      // 先加载历史 tick（从数据库）
+      const histRes = await fetch("/api/history?limit=100");
+      const history = await histRes.json();
+      (history || []).forEach(state => ingestFullState(state));
+
+      // 再加载当前状态
       const res = await fetch("/api/state");
       lastState = await res.json();
       ingestFullState(lastState);
@@ -158,7 +196,7 @@
     grid.innerHTML = Object.entries(locs).map(([loc, ids]) => {
       const tags = (ids || []).map(id => {
         const a = agentMap[id];
-        const name = a ? (a.name || a.agent_id) : id;
+        const name = a ? (a.name || id) : (agentNames[id] || resolveId(id));
         const emotion = a ? a.emotion : '';
         const isFocus = focusAgent === id ? ' focused' : '';
         return `<span class="agent-tag${isFocus}" onclick="focusOnAgent('${id}')" oncontextmenu="event.preventDefault(); showAgentCard('${id}')">${name}${emotion ? ' · ' + emotion : ''}</span>`;
@@ -188,7 +226,7 @@
             ${c.location ? `<span class="aci-loc">📍${c.location}</span>` : ''}
           </div>
           <div class="aci-body">
-            ${c.items.map(i => `<div class="aci-line ${i.cls}"><span class="aci-icon">${i.icon}</span><span class="aci-text">${escapeHtml(i.text)}</span></div>`).join('')}
+            ${c.items.map(i => `<div class="aci-line ${i.cls}"><span class="aci-icon">${i.icon}</span><span class="aci-text">${escapeHtml(resolveId(i.text))}</span></div>`).join('')}
           </div>
         </div>
       `).join('');
@@ -205,10 +243,24 @@
     return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   }
 
+  // 将 agent_id 替换为显示名
+  function resolveId(text) {
+    if (!text) return text;
+    let s = String(text);
+    for (const [id, name] of Object.entries(agentNames)) {
+      if (s.includes(id)) s = s.split(id).join(name);
+    }
+    if (playerName && s.includes('player')) s = s.split('player').join(playerName);
+    return s;
+  }
+
   window.focusOnAgent = (id) => {
-    focusAgent = id;
-    const a = lastState ? (lastState.agents || []).find(x => x.agent_id === id) : null;
-    const name = a ? (a.name || id) : id;
+    // 如果点击的是玩家名字，映射到 'player'
+    let filterId = id;
+    if (playerName && id === playerName) filterId = 'player';
+    focusAgent = filterId;
+    const a = lastState ? (lastState.agents || []).find(x => x.agent_id === id || x.agent_id === filterId) : null;
+    const name = a ? (a.name || id) : (agentNames[id] || id);
     $("#focus-name").textContent = name;
     $("#focus-bar").style.display = 'flex';
     $("#timeline-title").textContent = `🎯 聚焦事件流`;
@@ -229,8 +281,12 @@
     $("#join-form").style.display = "none";
     $("#player-joined").style.display = "block";
     $("#player-log-section").style.display = "block";
-    const name = ps.name || ps.player_id || "玩家";
-    $("#player-info").innerHTML = `<strong>${name}</strong> · 📍 ${ps.location} · ${ps.action || ""}`;
+    const name = ps.name || playerName || ps.player_id || "玩家";
+    playerName = name;
+    // 更新面板标题
+    const h2 = document.querySelector('#player-section h2');
+    if (h2) h2.textContent = `🎭 ${name}`;
+    $("#player-info").innerHTML = `📍 ${ps.location} · ${ps.action || ""}`;
   }
 
   window.showJoinForm = () => { $("#player-not-joined").style.display = "none"; $("#join-form").style.display = "block"; };
@@ -271,6 +327,7 @@
     };
     await fetch("/api/player/join", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
     playerJoined = true;
+    playerName = body.name;
     showPlayerUI({ name: body.name, location: body.init_location, action: "刚刚到达" });
     addPlayerLog(`🎮 ${body.name} 加入了清水镇（${body.init_location}）`);
   };
@@ -345,11 +402,18 @@
 
   // ── 玩家事件日志 ──
   let playerLogs = [];
+  let playerLogKeys = new Set();
   function addPlayerLog(text, tick, time) {
     const t = time || (lastState ? lastState.game_time : '');
     const k = tick !== undefined ? tick : (lastState ? lastState.tick : 0);
+    const logKey = `${k}::${text}`;
+    if (playerLogKeys.has(logKey)) return;
+    playerLogKeys.add(logKey);
     playerLogs.unshift({ time: t, tick: k, text });
-    if (playerLogs.length > 100) playerLogs.length = 100;
+    if (playerLogs.length > 100) {
+      const removed = playerLogs.pop();
+      playerLogKeys.delete(`${removed.tick}::${removed.text}`);
+    }
     renderPlayerLog();
   }
   function renderPlayerLog() {
@@ -482,6 +546,73 @@
       </div>
     </div>`;
     existing.style.display = 'flex';
+  };
+
+  // ── 推进控制 ──
+  let autopilotOn = false;
+
+  function lockPlayerUI(locked, tick) {
+    const actions = document.querySelector('.player-actions');
+    const subs = document.querySelectorAll('.action-sub');
+    const controls = document.querySelector('.sim-controls');
+    const overlay = document.getElementById('tick-overlay') || createTickOverlay();
+
+    if (locked) {
+      if (actions) actions.style.pointerEvents = 'none';
+      if (actions) actions.style.opacity = '0.4';
+      subs.forEach(el => { el.style.pointerEvents = 'none'; el.style.opacity = '0.4'; });
+      if (controls) controls.style.pointerEvents = 'none';
+      if (controls) controls.style.opacity = '0.4';
+      overlay.style.display = 'flex';
+      overlay.querySelector('span').textContent = `🌀 世界运转中… (Tick ${tick})`;
+    } else {
+      if (actions) actions.style.pointerEvents = '';
+      if (actions) actions.style.opacity = '';
+      subs.forEach(el => { el.style.pointerEvents = ''; el.style.opacity = ''; });
+      if (controls) controls.style.pointerEvents = '';
+      if (controls) controls.style.opacity = '';
+      overlay.style.display = 'none';
+    }
+  }
+
+  function createTickOverlay() {
+    const div = document.createElement('div');
+    div.id = 'tick-overlay';
+    div.innerHTML = '<span>🌀 世界运转中…</span>';
+    document.getElementById('player-section').appendChild(div);
+    return div;
+  }
+
+  window.doSingleTick = async () => {
+    await fetch('/api/tick', { method: 'POST' });
+  };
+
+  window.doRunN = async () => {
+    const n = parseInt($('#run-n')?.value) || 6;
+    await fetch('/api/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ticks: n }) });
+  };
+
+  window.doAutoRun = async () => {
+    await fetch('/api/start', { method: 'POST' });
+  };
+
+  window.doInterrupt = async () => {
+    await fetch('/api/player/interrupt', { method: 'POST' });
+  };
+
+  window.doResume = async () => {
+    await fetch('/api/start', { method: 'POST' });
+  };
+
+  window.toggleAutopilot = async () => {
+    autopilotOn = !autopilotOn;
+    await fetch('/api/player/autopilot', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: autopilotOn }) });
+    const btn = $('#btn-autopilot');
+    if (btn) {
+      btn.textContent = autopilotOn ? '🤖 托管中' : '🤖 托管';
+      btn.style.background = autopilotOn ? '#2d5a27' : '';
+    }
+    addPlayerLog(autopilotOn ? '🤖 已开启 AI 托管' : '🤖 已关闭 AI 托管');
   };
 
   loadWorldConfig();

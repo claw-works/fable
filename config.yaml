@@ -1,12 +1,13 @@
 llm:
-  base_url: "https://api.openai.com/v1"
-  api_key: "your-api-key"
-  model: "gpt-4o-mini"
-  timeout: 30
+  provider: "bedrock"
+  base_url: "https://bedrock-runtime.us-east-1.amazonaws.com"
+  api_key: "QUJDS1FtVmtjbTlqYTBGUVNVdGxlUzE1YlRSc0xXRjBMVE15TURJek5qRXhPREUzTWpvNFp6bG1NVGRKTW5CbFRGcFVVVWwyYjNKVmVXeEdVVWw1SzNOQk9FTm1XRzAwWlZKSWMzQkpkRkY1YTJkU2JIZDRaaXRVWW5wbWF6aDZNRDA5"
+  model: "global.anthropic.claude-sonnet-4-6"
+  timeout: 60
 
 server:
   port: 8080
 
 simulation:
-  tick_interval: 5  # 秒
+  tick_interval: 5
   auto_run: false

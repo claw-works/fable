@@ -3,11 +3,14 @@ package world
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/claw-works/fable/internal/agent"
 	"github.com/claw-works/fable/internal/llm"
@@ -36,6 +39,7 @@ type World struct {
 	Agents        map[string]*agent.Agent
 	State         schema.WorldState
 	History       []schema.WorldState
+	Snapshots     map[int]map[string]schema.AgentSnapshot // tick -> agentID -> snapshot
 	OnTick        func(schema.WorldState)       // tick 完成后推送完整状态
 	OnEvent       func(StreamEvent)             // 增量事件实时推送
 	Player        *schema.PlayerConfig
@@ -43,6 +47,8 @@ type World struct {
 	PendingAction *schema.PlayerAction
 	Mode          schema.SimulationMode
 	Conversation  *schema.ConversationSession
+	Autopilot     bool              // 托管模式：LLM 替玩家决策
+	llm           *llm.Client
 }
 
 // Load 从指定目录加载世界配置和角色配置。
@@ -92,13 +98,15 @@ func Load(dir string, saveName string, llmClient *llm.Client) (*World, error) {
 	}
 
 	w := &World{
-		WorldID:  worldID,
-		WorldDir: dir,
-		SaveName: saveName,
-		Manifest: manifest,
-		Config:   wCfg,
-		Agents:   agents,
-		Mode:     schema.ModeIdle,
+		WorldID:   worldID,
+		WorldDir:  dir,
+		SaveName:  saveName,
+		Manifest:  manifest,
+		Config:    wCfg,
+		Agents:    agents,
+		Mode:      schema.ModeIdle,
+		Snapshots: make(map[int]map[string]schema.AgentSnapshot),
+		llm:       llmClient,
 		State: schema.WorldState{
 			Tick:      0,
 			GameTime:  "Day1 08:00",
@@ -112,6 +120,9 @@ func Load(dir string, saveName string, llmClient *llm.Client) (*World, error) {
 		w.State = saved.State
 		w.Player = saved.Player
 		w.PlayerState = saved.PlayerState
+		if w.Player != nil && w.PlayerState != nil && w.PlayerState.Name == "" {
+			w.PlayerState.Name = w.Player.Name
+		}
 		for _, a := range saved.State.Agents {
 			if ag, ok := w.Agents[a.AgentID]; ok {
 				ag.State = a
@@ -140,12 +151,27 @@ func (w *World) Tick(ctx context.Context) TickResponse {
 	w.State.GameTime = w.advanceTime(w.State.GameTime)
 	log.Printf("[tick %d] 时间推进到 %s", w.State.Tick, w.State.GameTime)
 
+	// 通知前端 tick 开始
+	if w.OnEvent != nil {
+		w.OnEvent(StreamEvent{Type: "tick_start", GameTime: w.State.GameTime, Tick: w.State.Tick})
+	}
+
 	// 处理玩家行动（有就处理，没有就跳过）
 	var playerEvent string
 	if w.Player != nil && w.PendingAction != nil {
 		playerEvent = w.applyPlayerAction()
 		w.PendingAction = nil
 		log.Printf("[tick %d] 玩家行动: %s", w.State.Tick, playerEvent)
+	} else if w.Player != nil && w.Autopilot {
+		// 托管模式：LLM 替玩家决策
+		if act, err := w.autopilotDecide(ctx); err != nil {
+			log.Printf("[tick %d] 托管决策失败: %v", w.State.Tick, err)
+		} else {
+			w.PendingAction = act
+			playerEvent = w.applyPlayerAction()
+			w.PendingAction = nil
+			log.Printf("[tick %d] 托管行动: %s", w.State.Tick, playerEvent)
+		}
 	} else if w.Player != nil {
 		log.Printf("[tick %d] 玩家在场但无行动，继续推理", w.State.Tick)
 	}
@@ -163,10 +189,7 @@ func (w *World) Tick(ctx context.Context) TickResponse {
 	}
 	onEvent := w.OnEvent
 	playerState := w.PlayerState
-	var playerID string
-	if w.Player != nil {
-		playerID = w.Player.ID
-	}
+	player := w.Player
 
 	// 释放锁，开始并行推理（不持锁）
 	w.mu.Unlock()
@@ -175,6 +198,21 @@ func (w *World) Tick(ctx context.Context) TickResponse {
 	// 立即推送玩家事件
 	if playerEvent != "" && onEvent != nil {
 		onEvent(StreamEvent{Type: "event", Text: playerEvent, GameTime: snapshot.GameTime, Tick: snapshot.Tick})
+		// 同时推送结构化的玩家状态，让前端能显示行动/对话/位置
+		if playerState != nil {
+			ps := &schema.AgentState{
+				AgentID:  "player",
+				Name:     player.Name,
+				Tick:     snapshot.Tick,
+				GameTime: snapshot.GameTime,
+				Location: playerState.Location,
+				Action:   playerState.Action,
+				Target:   playerState.Target,
+				Dialogue: playerState.Dialogue,
+				Emotion:  "—",
+			}
+			onEvent(StreamEvent{Type: "agent_update", AgentState: ps, GameTime: snapshot.GameTime, Tick: snapshot.Tick})
+		}
 	}
 
 	// 并行推理
@@ -215,14 +253,15 @@ func (w *World) Tick(ctx context.Context) TickResponse {
 		events = append(events, playerEvent)
 	}
 	locations := make(map[string][]string)
-	if playerState != nil {
-		locations[playerState.Location] = append(locations[playerState.Location], playerID)
+	if playerState != nil && player != nil {
+		locations[playerState.Location] = append(locations[playerState.Location], player.Name)
 	}
 
 	for range agentList {
 		r := <-results
 		agentStates = append(agentStates, r.state)
-		locations[r.state.Location] = append(locations[r.state.Location], r.id)
+		agName := r.state.Name
+		locations[r.state.Location] = append(locations[r.state.Location], agName)
 		if r.state.Dialogue != nil {
 			if ag, ok := w.Agents[r.id]; ok {
 				events = append(events, fmt.Sprintf("%s 说：%s", ag.Config.Name, *r.state.Dialogue))
@@ -239,12 +278,20 @@ func (w *World) Tick(ctx context.Context) TickResponse {
 	w.State.Locations = locations
 	w.State.Events = events
 	w.History = append(w.History, w.State)
+
+	// 保存快照
+	snapMap := make(map[string]schema.AgentSnapshot, len(w.Agents))
+	for id, a := range w.Agents {
+		snapMap[id] = a.Snapshot()
+	}
+	w.Snapshots[w.State.Tick] = snapMap
+
 	finalState := w.State
 
 	// 检测是否有 NPC 对玩家说话 → 暂停等待玩家响应
 	if w.Player != nil && w.Mode == schema.ModeRunning {
 		for _, a := range agentStates {
-			if a.Target != nil && *a.Target == w.Player.ID && a.Dialogue != nil {
+			if a.Target != nil && (*a.Target == w.Player.Name) && a.Dialogue != nil {
 				w.Mode = schema.ModePaused
 				log.Printf("[tick %d] NPC %s 对玩家说话，世界暂停等待响应", w.State.Tick, a.AgentID)
 				break
@@ -256,6 +303,9 @@ func (w *World) Tick(ctx context.Context) TickResponse {
 	w.mu.Unlock()
 
 	// 推送完整状态（tick 结束）
+	if w.OnEvent != nil {
+		w.OnEvent(StreamEvent{Type: "tick_end", GameTime: finalState.GameTime, Tick: finalState.Tick})
+	}
 	if w.OnTick != nil {
 		w.OnTick(finalState)
 	}
@@ -264,6 +314,27 @@ func (w *World) Tick(ctx context.Context) TickResponse {
 	saveData := schema.SaveData{State: finalState, Player: w.Player, PlayerState: ps}
 	if err := storage.SaveTick(saveData); err != nil {
 		log.Printf("[tick %d] 存档失败: %v", finalState.Tick, err)
+	}
+
+	// 反思：每 N 个 tick 触发一次，等待全部完成后再返回
+	if agent.ShouldReflect(finalState.Tick) {
+		log.Printf("[tick %d] 触发反思...", finalState.Tick)
+		var wg sync.WaitGroup
+		for id, a := range w.Agents {
+			wg.Add(1)
+			go func(id string, a *agent.Agent) {
+				defer wg.Done()
+				rctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+				defer cancel()
+				if err := a.Reflect(rctx, finalState); err != nil {
+					log.Printf("[tick %d] NPC %s 反思失败: %v", finalState.Tick, id, err)
+				} else {
+					log.Printf("[tick %d] NPC %s 反思完成", finalState.Tick, id)
+				}
+			}(id, a)
+		}
+		wg.Wait()
+		log.Printf("[tick %d] 全部反思完成", finalState.Tick)
 	}
 
 	return TickResponse{State: finalState, PlayerState: ps}
@@ -287,11 +358,15 @@ func (w *World) applyPlayerAction() string {
 		ps.Action = "与人交谈"
 		ps.Target = act.Target
 		ps.Dialogue = &act.Content
-		target := ""
+		targetName := ""
 		if act.Target != nil {
-			target = *act.Target
+			targetName = *act.Target
+			// 尝试把 ID 转为名字
+			if a, ok := w.Agents[targetName]; ok {
+				targetName = a.Config.Name
+			}
 		}
-		return fmt.Sprintf("【玩家】%s 对 %s 说：%s", w.Player.Name, target, act.Content)
+		return fmt.Sprintf("【玩家】%s 对 %s 说：%s", w.Player.Name, targetName, act.Content)
 	case "act":
 		ps.Action = act.Content
 		return fmt.Sprintf("【玩家】%s %s", w.Player.Name, act.Content)
@@ -334,6 +409,7 @@ func (w *World) JoinPlayer(cfg schema.PlayerConfig) {
 	w.Player = &cfg
 	w.PlayerState = &schema.PlayerState{
 		PlayerID: cfg.ID,
+		Name:     cfg.Name,
 		Tick:     w.State.Tick,
 		GameTime: w.State.GameTime,
 		Location: cfg.InitLocation,
@@ -371,6 +447,119 @@ func (w *World) advanceTime(current string) string {
 		day++
 	}
 	return fmt.Sprintf("Day%d %02d:%02d", day, hour, min)
+}
+
+// autopilotDecide 用 LLM 替玩家生成行动。
+func (w *World) autopilotDecide(ctx context.Context) (*schema.PlayerAction, error) {
+	p := w.Player
+	ps := w.PlayerState
+
+	// 收集同地点的人
+	var nearby []string
+	if ids, ok := w.State.Locations[ps.Location]; ok {
+		for _, id := range ids {
+			if id != p.ID && id != p.Name {
+				nearby = append(nearby, id)
+			}
+		}
+	}
+
+	// 收集可去的地点
+	var locs []string
+	for _, loc := range w.Config.Locations {
+		locs = append(locs, loc.Name)
+	}
+
+	prompt := fmt.Sprintf(
+		"当前时间：%s\n你现在在：%s\n周围的人：%s\n可去的地点：%s\n最近发生的事：\n",
+		w.State.GameTime, ps.Location,
+		strings.Join(nearby, "、"),
+		strings.Join(locs, "、"),
+	)
+	for _, e := range w.State.Events {
+		prompt += "- " + e + "\n"
+	}
+
+	messages := []llm.Message{
+		{Role: "system", Content: fmt.Sprintf(
+			"你是%s，%s，性格：%s。背景：%s\n"+
+				"请决定下一步行动。以 JSON 回复，包含字段："+
+				"type(\"move\"/\"talk\"/\"act\"/\"skip\")，"+
+				"location(move时目标地点)，target(talk时目标人名)，content(talk/act的内容)。",
+			p.Name, p.Occupation, p.Personality, p.Backstory,
+		)},
+		{Role: "user", Content: prompt},
+	}
+
+	resp, err := w.llm.ChatJSON(ctx, messages)
+	if err != nil {
+		return nil, err
+	}
+
+	var result struct {
+		Type     string  `json:"type"`
+		Location *string `json:"location,omitempty"`
+		Target   *string `json:"target,omitempty"`
+		Content  string  `json:"content"`
+	}
+	if err := json.Unmarshal([]byte(resp), &result); err != nil {
+		return nil, fmt.Errorf("parse autopilot: %w", err)
+	}
+
+	return &schema.PlayerAction{
+		Type:     result.Type,
+		Location: result.Location,
+		Target:   result.Target,
+		Content:  result.Content,
+	}, nil
+}
+
+// RestoreToTick 恢复到指定 tick 的快照状态。
+func (w *World) RestoreToTick(tick int) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	snapMap, ok := w.Snapshots[tick]
+	if !ok {
+		return fmt.Errorf("tick %d 没有快照", tick)
+	}
+
+	// 恢复每个 Agent 的状态
+	for id, snap := range snapMap {
+		if a, ok := w.Agents[id]; ok {
+			a.RestoreSnapshot(snap)
+		}
+	}
+
+	// 恢复世界状态到该 tick 的历史记录
+	for _, h := range w.History {
+		if h.Tick == tick {
+			w.State = h
+			break
+		}
+	}
+
+	// 截断历史到该 tick
+	for i, h := range w.History {
+		if h.Tick > tick {
+			w.History = w.History[:i]
+			break
+		}
+	}
+
+	log.Printf("[world] 已恢复到 tick %d", tick)
+	return nil
+}
+
+// GetSnapshotTicks 返回所有有快照的 tick 列表。
+func (w *World) GetSnapshotTicks() []int {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	ticks := make([]int, 0, len(w.Snapshots))
+	for t := range w.Snapshots {
+		ticks = append(ticks, t)
+	}
+	return ticks
 }
 
 // FindPath 用 BFS 找两点间最短路径，返回路径和总 Tick 消耗。

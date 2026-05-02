@@ -19,9 +19,6 @@
         </div>
       </div>
       <div class="control-inline">
-        <button onclick="fetch('/api/start',{method:'POST'})" title="自动运行">▶</button>
-        <button onclick="fetch('/api/stop',{method:'POST'})" title="暂停">⏸</button>
-        <button onclick="fetch('/api/tick',{method:'POST'})" title="下一轮">⏭</button>
       </div>
       <span id="game-time">Day1 08:00</span>
       <span id="tick-count">Tick: 0</span>
@@ -90,6 +87,20 @@
           <div id="conv-picker" class="action-sub" style="display:none">
             <select id="conv-target"></select>
             <button onclick="startConversation()">开始对话</button>
+          </div>
+          <hr style="border-color:#333;margin:0.8rem 0"/>
+          <div class="sim-controls">
+            <span style="font-size:0.85rem;color:#aaa">推进控制</span>
+            <div class="sim-btn-row">
+              <button onclick="doSingleTick()" title="单步">⏭ 1步</button>
+              <button onclick="doRunN()" title="运行N步">▶ <input id="run-n" type="number" value="6" min="1" max="200" style="width:3rem;text-align:center" onclick="event.stopPropagation()"/>步</button>
+              <button onclick="doAutoRun()" title="全自动">⏩ 自动</button>
+              <button onclick="doInterrupt()" title="暂停/中断">⏸ 暂停</button>
+              <button onclick="doResume()" title="继续">▶ 继续</button>
+            </div>
+            <div class="sim-btn-row" style="margin-top:0.3rem">
+              <button id="btn-autopilot" onclick="toggleAutopilot()" title="AI托管玩家行动">🤖 托管</button>
+            </div>
           </div>
         </div>
       </div>

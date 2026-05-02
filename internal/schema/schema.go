@@ -14,6 +14,50 @@ type AgentState struct {
 	Emotion      string   `json:"emotion"        yaml:"emotion"`
 	InnerThought string   `json:"inner_thought"  yaml:"inner_thought"`
 	MemoryUpdate []string `json:"memory_update"  yaml:"memory_update"`
+	// 关系变化：本次 tick 中对其他角色的关系调整
+	RelationChanges []RelationChange `json:"relation_changes,omitempty" yaml:"relation_changes,omitempty"`
+}
+
+// Relation 表示一个角色对另一个角色的关系。
+type Relation struct {
+	TargetID    string `json:"target_id" yaml:"target_id"`
+	Label       string `json:"label" yaml:"label"`             // "朋友"、"对手"、"暗恋"
+	Affinity    int    `json:"affinity" yaml:"affinity"`       // -100 ~ 100
+	Description string `json:"description" yaml:"description"` // 关系描述
+}
+
+// RelationChange 表示一次关系变化。
+type RelationChange struct {
+	TargetID       string `json:"target_id"`
+	AffinityDelta  int    `json:"affinity_delta"`            // 变化量
+	NewLabel       string `json:"new_label,omitempty"`       // 可选：关系标签变化
+	Reason         string `json:"reason"`                    // 变化原因
+}
+
+// DailyPlan 表示 Agent 的一天计划。
+type DailyPlan struct {
+	Day   int          `json:"day"`
+	Goals []string     `json:"goals"`  // 当天目标
+	Steps []PlanStep   `json:"steps"`  // 具体步骤
+}
+
+// PlanStep 表示计划中的一个步骤。
+type PlanStep struct {
+	Time     string `json:"time"`     // "08:00"
+	Action   string `json:"action"`
+	Location string `json:"location"`
+	Done     bool   `json:"done"`
+}
+
+// AgentSnapshot 表示某个 tick 的完整 Agent 内部状态，用于快照恢复。
+type AgentSnapshot struct {
+	AgentID         string            `json:"agent_id"`
+	State           AgentState        `json:"state"`
+	ShortTermMemory []string          `json:"short_term_memory"`
+	LongTermMemory  []string          `json:"long_term_memory"`
+	CurrentPlan     *DailyPlan        `json:"current_plan,omitempty"`
+	Relations       map[string]Relation `json:"relations"`
+	LongTermGoal    string            `json:"long_term_goal"`
 }
 
 // WorldState 表示某一 Tick 的世界快照。
@@ -75,10 +119,11 @@ type Config struct {
 
 // LLMConfig 表示 LLM 调用配置。
 type LLMConfig struct {
-	BaseURL string `yaml:"base_url"`
-	APIKey  string `yaml:"api_key"`
-	Model   string `yaml:"model"`
-	Timeout int    `yaml:"timeout"` // 秒
+	Provider string `yaml:"provider"` // "openai"(默认) 或 "bedrock"
+	BaseURL  string `yaml:"base_url"`
+	APIKey   string `yaml:"api_key"`
+	Model    string `yaml:"model"`
+	Timeout  int    `yaml:"timeout"` // 秒
 }
 
 // ServerConfig 表示 HTTP 服务配置。
@@ -131,6 +176,7 @@ type PlayerAction struct {
 // PlayerState 玩家当前状态（和 AgentState 对齐）。
 type PlayerState struct {
 	PlayerID string  `json:"player_id"`
+	Name     string  `json:"name"`
 	Tick     int     `json:"tick"`
 	GameTime string  `json:"game_time"`
 	Location string  `json:"location"`

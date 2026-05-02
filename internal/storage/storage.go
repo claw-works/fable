@@ -171,6 +171,34 @@ func LoadLatestSave() (*schema.SaveData, error) {
 	return &data, nil
 }
 
+// QueryRecentTicks 查询最近 N 个 tick 的完整世界状态。
+func QueryRecentTicks(limit int) ([]schema.WorldState, error) {
+	rows, err := DB.Query(
+		`SELECT state_json FROM ticks ORDER BY tick DESC LIMIT ?`, limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []schema.WorldState
+	for rows.Next() {
+		var stateJSON string
+		if err := rows.Scan(&stateJSON); err != nil {
+			return nil, err
+		}
+		var state schema.WorldState
+		if json.Unmarshal([]byte(stateJSON), &state) == nil {
+			results = append(results, state)
+		}
+	}
+	// 反转为时间正序
+	for i, j := 0, len(results)-1; i < j; i, j = i+1, j-1 {
+		results[i], results[j] = results[j], results[i]
+	}
+	return results, nil
+}
+
 // QueryAgentHistory 查询某个 NPC 的历史状态。
 func QueryAgentHistory(agentID string, limit int) ([]schema.AgentState, error) {
 	rows, err := DB.Query(
