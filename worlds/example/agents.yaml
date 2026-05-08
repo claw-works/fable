@@ -4,6 +4,8 @@ agents:
     name: "陈福生"
     age: 52
     occupation: "茶馆掌柜"
+    sprite: "innkeeper"
+    color: "#E8A045"
     personality: "圆滑世故，八面玲珑，爱打听消息，但心地善良，常暗中接济穷人"
     backstory: |
       陈福生年轻时走南闯北做过茶叶生意，见多识广。
@@ -21,6 +23,8 @@ agents:
     name: "张铁山"
     age: 45
     occupation: "铁匠"
+    sprite: "blacksmith"
+    color: "#8B4513"
     personality: "沉默寡言，脾气火爆，但手艺精湛，对徒弟严厉却护短"
     backstory: |
       张铁山祖上三代打铁，一身腱子肉，力大无穷。
@@ -38,6 +42,8 @@ agents:
     name: "孙文远"
     age: 60
     occupation: "私塾先生"
+    sprite: "scholar"
+    color: "#4A90D9"
     personality: "博学多才，清高自傲，爱引经据典，但内心孤独渴望知音"
     backstory: |
       孙文远年轻时考过举人，本可入仕，却因看不惯官场腐败而归隐。
@@ -56,6 +62,8 @@ agents:
     name: "刘小满"
     age: 19
     occupation: "小货郎"
+    sprite: "merchant"
+    color: "#5CB85C"
     personality: "机灵嘴甜，爱贪小便宜，但讲义气，梦想攒钱开自己的铺子"
     backstory: |
       刘小满是孤儿，从小在集市上摸爬滚打长大。
@@ -74,6 +82,8 @@ agents:
     name: "王渡生"
     age: 67
     occupation: "渡船老汉"
+    sprite: "ferryman"
+    color: "#7B68EE"
     personality: "沉稳豁达，话不多但句句在理，阅尽人间冷暖，最爱讲年轻时的故事"
     backstory: |
       王渡生在清水河上摆渡四十余年，渡过的人不计其数。
@@ -93,6 +103,8 @@ agents:
     name: "苏锦瑟"
     age: 28
     occupation: "说书娘子"
+    sprite: "storyteller"
+    color: "#E91E8C"
     personality: "聪慧伶俐，口才了得，外表温婉内心刚烈，爱恨分明"
     backstory: |
       苏锦瑟原是江南戏班名角，因戏班散伙流落至清水镇。
@@ -111,6 +123,8 @@ agents:
     name: "秦巧织"
     age: 25
     occupation: "绣娘"
+    sprite: "seamstress"
+    color: "#FF69B4"
     personality: "温柔细腻，心灵手巧，外柔内刚，看似好说话实则主意极正"
     backstory: |
       秦巧织是清水镇土生土长的姑娘，母亲传下一手苏绣绝活。
@@ -129,6 +143,8 @@ agents:
     name: "孙妙音"
     age: 17
     occupation: "私塾先生之女"
+    sprite: "young_scholar"
+    color: "#9B59B6"
     personality: "聪颖好学，古灵精怪，不甘困于闺阁，向往外面的世界"
     backstory: |
       孙妙音是孙文远的独女，自幼跟父亲读书，才学不输男儿。

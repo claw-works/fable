@@ -5,9 +5,21 @@ description: |
   小镇虽不大，却五脏俱全，茶馆里常有说书人讲古，
   集市上南来北往的商贩络绎不绝，是个热闹又安宁的地方。
 
+# 地图全局配置（Godot 渲染用）
+map:
+  width: 1280
+  height: 720
+  tile_size: 32
+  background: "grass"
+
 locations:
   - name: "茶馆"
+    type: "teahouse"
     description: "镇上最热闹的地方，掌柜泡得一手好茶，说书人每日午后开讲。"
+    x: 320
+    y: 200
+    width: 160
+    height: 120
     connected:
       - name: "集市"
         distance: 1
@@ -15,8 +27,14 @@ locations:
         distance: 1
       - name: "城隍庙"
         distance: 2
+
   - name: "集市"
+    type: "market"
     description: "沿街两排摊位，卖的是柴米油盐、针头线脑，偶有外地珍奇货物。"
+    x: 640
+    y: 360
+    width: 200
+    height: 140
     connected:
       - name: "茶馆"
         distance: 1
@@ -24,22 +42,40 @@ locations:
         distance: 1
       - name: "渡口"
         distance: 2
+
   - name: "铁匠铺"
+    type: "blacksmith"
     description: "炉火日夜不熄，叮叮当当的打铁声是小镇的心跳。"
+    x: 960
+    y: 200
+    width: 140
+    height: 120
     connected:
       - name: "集市"
         distance: 1
       - name: "城隍庙"
         distance: 1
+
   - name: "私塾"
+    type: "school"
     description: "青瓦白墙的小院，朗朗读书声从窗户飘出。"
+    x: 160
+    y: 480
+    width: 140
+    height: 120
     connected:
       - name: "茶馆"
         distance: 1
       - name: "城隍庙"
         distance: 1
+
   - name: "城隍庙"
+    type: "temple"
     description: "镇上最古老的建筑，香火旺盛，逢年过节必有庙会。"
+    x: 640
+    y: 560
+    width: 160
+    height: 120
     connected:
       - name: "茶馆"
         distance: 2
@@ -47,8 +83,14 @@ locations:
         distance: 1
       - name: "私塾"
         distance: 1
+
   - name: "渡口"
+    type: "dock"
     description: "清水河上唯一的渡口，连接着外面的世界。"
+    x: 1080
+    y: 520
+    width: 140
+    height: 100
     connected:
       - name: "集市"
         distance: 2

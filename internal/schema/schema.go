@@ -81,18 +81,27 @@ type Location struct {
 	Description string       `json:"description" yaml:"description"`
 	Connected   []Connection `json:"connected" yaml:"connected"`
 	Capacity    int          `json:"capacity,omitempty" yaml:"capacity,omitempty"`
+	// 客户端渲染用字段
+	Type        string       `json:"type,omitempty" yaml:"type,omitempty"`         // 地点类型，用于匹配视觉素材，如 "teahouse"/"market"
+	X           float64      `json:"x,omitempty" yaml:"x,omitempty"`               // 地图像素坐标 X
+	Y           float64      `json:"y,omitempty" yaml:"y,omitempty"`               // 地图像素坐标 Y
+	Width       float64      `json:"width,omitempty" yaml:"width,omitempty"`       // 区域宽度（像素）
+	Height      float64      `json:"height,omitempty" yaml:"height,omitempty"`     // 区域高度（像素）
 }
 
 // AgentConfig 表示角色配置，从 YAML 读取。
 type AgentConfig struct {
-	ID            string            `yaml:"id"`
-	Name          string            `yaml:"name"`
-	Age           int               `yaml:"age"`
-	Occupation    string            `yaml:"occupation"`
-	Personality   string            `yaml:"personality"`
-	Backstory     string            `yaml:"backstory"`
-	Relationships map[string]string `yaml:"relationships"`
-	InitLocation  string            `yaml:"init_location"`
+	ID            string            `json:"id" yaml:"id"`
+	Name          string            `json:"name" yaml:"name"`
+	Age           int               `json:"age" yaml:"age"`
+	Occupation    string            `json:"occupation" yaml:"occupation"`
+	Personality   string            `json:"personality" yaml:"personality"`
+	Backstory     string            `json:"backstory" yaml:"backstory"`
+	Relationships map[string]string `json:"relationships" yaml:"relationships"`
+	InitLocation  string            `json:"init_location" yaml:"init_location"`
+	// 客户端渲染用字段
+	Sprite        string            `json:"sprite,omitempty" yaml:"sprite,omitempty"`     // 指定精灵名，没有则按 occupation 推断
+	Color         string            `json:"color,omitempty" yaml:"color,omitempty"`       // 占位色（hex），用于无精灵时的色块显示
 }
 
 // WorldConfig 表示世界配置，从 YAML 读取。
@@ -102,6 +111,7 @@ type WorldConfig struct {
 	Locations   []Location `json:"locations" yaml:"locations"`
 	Rules       []string   `json:"rules" yaml:"rules"`
 	TimeStep    int        `json:"time_step" yaml:"time_step"`
+	Map         MapConfig  `json:"map" yaml:"map"`   // 地图渲染配置
 }
 
 // AgentsFile 表示 agents.yaml 的顶层结构。
@@ -135,6 +145,14 @@ type ServerConfig struct {
 type SimulationConfig struct {
 	TickInterval int  `yaml:"tick_interval"` // 秒
 	AutoRun      bool `yaml:"auto_run"`
+}
+
+// MapConfig 表示地图的全局渲染配置。
+type MapConfig struct {
+	Width      int     `json:"width" yaml:"width"`           // 地图总宽度（像素）
+	Height     int     `json:"height" yaml:"height"`         // 地图总高度（像素）
+	TileSize   int     `json:"tile_size" yaml:"tile_size"`   // 瓦片尺寸（像素），默认 32
+	Background string  `json:"background" yaml:"background"` // 背景色或背景图资源名
 }
 
 // WorldManifest 表示世界包的元信息（manifest.yaml）。
